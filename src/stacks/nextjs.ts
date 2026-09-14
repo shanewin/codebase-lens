@@ -1,207 +1,202 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
-import { safePath, walkFiles } from '../core/helpers.js'
+import ts from 'typescript'
+import { walkFiles } from '../core/helpers.js'
 import type { StackAdapter, ToolCollector } from '../core/types.js'
+import { findWorkspace } from '../core/workspace.js'
+import { bodyDirectives, createResolver, fileDirective, findDir, getImports, lineOf, literalExport, parseFile } from './nextjs/ast.js'
+import { readMiddleware, matcherMatches, registerAuthTools } from './nextjs/auth.js'
+import { registerBoundaryTools } from './nextjs/boundaries.js'
+import { buildAppTree, registerRouteTools, resolveAppRoutes, type Finding } from './nextjs/routes.js'
+import { registerUnusedTools } from './nextjs/unused.js'
 
-function findAppDir(root: string): string | null {
-  for (const c of ['src/app', 'app']) {
-    const d = join(root, c)
-    if (existsSync(d)) return d
+const SECRET_ENV_NAME = /SECRET|PRIVATE|PASSWORD|PASSWD|SERVICE_ROLE|CREDENTIAL|(ADMIN|MASTER|WRITE|ACCESS|SERVER|SIGNING|ENCRYPTION)_?(KEY|TOKEN)|DATABASE_URL|CONNECTION_STRING/i
+
+function nextVersion(root: string): string | null {
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'))
+    return ({ ...pkg.dependencies, ...pkg.devDependencies }['next'] as string | undefined) ?? null
+  } catch { return null }
+}
+
+function majorVersion(range: string | null): number | null {
+  const m = range?.match(/(\d+)/)
+  return m ? Number(m[1]) : null
+}
+
+// ---------------------------------------------------------------------------
+// next.config evaluation (literal-only, never executes user code)
+// ---------------------------------------------------------------------------
+
+type ConfigValue = string | number | boolean | null | ConfigValue[] | { [k: string]: ConfigValue } | { $expr: string }
+
+function toValue(sf: ts.SourceFile, e: ts.Expression): ConfigValue {
+  if (ts.isStringLiteralLike(e)) return e.text
+  if (ts.isNumericLiteral(e)) return Number(e.text)
+  if (e.kind === ts.SyntaxKind.TrueKeyword) return true
+  if (e.kind === ts.SyntaxKind.FalseKeyword) return false
+  if (e.kind === ts.SyntaxKind.NullKeyword) return null
+  if (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e)) return toValue(sf, e.expression)
+  if (ts.isArrayLiteralExpression(e)) return e.elements.map(el => toValue(sf, el as ts.Expression))
+  if (ts.isObjectLiteralExpression(e)) {
+    const obj: { [k: string]: ConfigValue } = {}
+    for (const p of e.properties) {
+      if (ts.isPropertyAssignment(p)) obj[p.name.getText(sf).replace(/^['"]|['"]$/g, '')] = toValue(sf, p.initializer)
+      else if (ts.isShorthandPropertyAssignment(p)) obj[p.name.text] = { $expr: p.name.text }
+      else if (ts.isMethodDeclaration(p)) obj[p.name.getText(sf)] = { $expr: p.getText(sf).slice(0, 2000) }
+    }
+    return obj
   }
-  return null
+  return { $expr: e.getText(sf).slice(0, 2000) }
 }
 
-function findPagesDir(root: string): string | null {
-  for (const c of ['src/pages', 'pages']) {
-    const d = join(root, c)
-    if (existsSync(d)) return d
+/** Find the object literal the config file exports, unwrapping plugin HOFs and local variables. */
+function findConfigObject(sf: ts.SourceFile): ts.ObjectLiteralExpression | null {
+  const locals = new Map<string, ts.Expression>()
+  let exported: ts.Expression | undefined
+  for (const s of sf.statements) {
+    if (ts.isVariableStatement(s)) {
+      for (const d of s.declarationList.declarations) if (ts.isIdentifier(d.name) && d.initializer) locals.set(d.name.text, d.initializer)
+    } else if (ts.isExportAssignment(s)) {
+      exported = s.expression
+    } else if (ts.isExpressionStatement(s) && ts.isBinaryExpression(s.expression) && s.expression.left.getText(sf) === 'module.exports') {
+      exported = s.expression.right
+    }
   }
-  return null
+  const seen = new Set<ts.Node>()
+  const unwrap = (e: ts.Expression | undefined): ts.ObjectLiteralExpression | null => {
+    if (!e || seen.has(e)) return null
+    seen.add(e)
+    if (ts.isObjectLiteralExpression(e)) return e
+    if (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e)) return unwrap(e.expression)
+    if (ts.isIdentifier(e)) return unwrap(locals.get(e.text))
+    if (ts.isCallExpression(e)) {
+      // withX(config) or withX(opts)(config): try the last argument first
+      for (const a of [...e.arguments].reverse()) { const r = unwrap(a); if (r) return r }
+      return unwrap(e.expression)
+    }
+    if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) {
+      // export default (phase) => ({ ... }) or => { return {...} }
+      if (!ts.isBlock(e.body)) return unwrap(e.body)
+      for (const st of e.body.statements) if (ts.isReturnStatement(st)) { const r = unwrap(st.expression); if (r) return r }
+    }
+    return null
+  }
+  return unwrap(exported)
 }
 
-const ROUTE_FILE_NAMES = new Set([
-  'page', 'layout', 'template', 'loading', 'error',
-  'global-error', 'not-found', 'route', 'default',
-])
-
-function folderToRouteSegment(name: string): { segment: string; kind: string } {
-  if (/^\(([a-zA-Z0-9_-]+)\)$/.test(name)) return { segment: '', kind: 'group' }
-  if (/^@([a-zA-Z0-9_]+)$/.test(name)) return { segment: '', kind: 'parallel' }
-  if (/^\[\[\.\.\.([a-zA-Z0-9_]+)\]\]$/.test(name)) return { segment: `[[...${name.slice(5, -2)}]]`, kind: 'optional-catch-all' }
-  if (/^\[\.\.\.([a-zA-Z0-9_]+)\]$/.test(name)) return { segment: `[...${name.slice(4, -1)}]`, kind: 'catch-all' }
-  if (/^\[([a-zA-Z0-9_]+)\]$/.test(name)) return { segment: `:${name.slice(1, -1)}`, kind: 'dynamic' }
-  if (name.startsWith('_')) return { segment: '', kind: 'private' }
-  return { segment: name, kind: 'static' }
+function get(obj: ConfigValue | undefined, path: string): ConfigValue | undefined {
+  let cur: any = obj
+  for (const k of path.split('.')) {
+    if (cur === null || typeof cur !== 'object' || Array.isArray(cur) || '$expr' in cur) return undefined
+    cur = cur[k]
+  }
+  return cur
 }
+
+// ---------------------------------------------------------------------------
+// Adapter
+// ---------------------------------------------------------------------------
 
 export const nextjsStack: StackAdapter = {
   name: 'nextjs',
 
   detect(root: string): boolean {
-    for (const name of ['next.config.js', 'next.config.mjs', 'next.config.ts']) {
+    for (const name of ['next.config.js', 'next.config.mjs', 'next.config.ts', 'next.config.mts', 'next.config.cjs']) {
       if (existsSync(join(root, name))) return true
     }
-    try {
-      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'))
-      return !!({ ...pkg.dependencies, ...pkg.devDependencies }['next'])
-    } catch { return false }
+    return nextVersion(root) !== null
   },
 
   register(tools: ToolCollector, root: string): void {
-    const appDir = findAppDir(root)
-    const pagesDir = findPagesDir(root)
+    const appDir = findDir(root, ['src/app', 'app'])
+    const pagesDir = findDir(root, ['src/pages', 'pages'])
 
-    // ---- Tool: list_routes ----
-    tools.register({
-      name: 'list_routes',
-      description:
-        'Map all routes in the Next.js app — both App Router (app/) and Pages Router (pages/). ' +
-        'Shows route path, type (page/api/layout/etc.), dynamic segments, and file size.',
-      parameters: {
-        type: 'object',
-        properties: {
-          type: {
-            type: 'string',
-            description: 'Filter by type: "page", "api", "layout", "all" (default "all")',
-          },
-        },
-        required: [],
-      },
-      execute: async (args: { type?: string }) => {
-        const filter = args.type ?? 'all'
-        const routes: { path: string; file: string; type: string; methods?: string[]; size: number }[] = []
-
-        // App Router
-        if (appDir) {
-          function walkApp(dir: string, routePrefix: string): void {
-            let entries: any[]
-            try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
-
-            for (const e of entries) {
-              const full = join(dir, e.name)
-              if (e.isDirectory()) {
-                const { segment, kind } = folderToRouteSegment(e.name)
-                if (kind === 'private') continue
-                const nextPrefix = segment ? `${routePrefix}/${segment}` : routePrefix
-                walkApp(full, nextPrefix)
-              } else if (e.isFile()) {
-                const baseName = e.name.replace(/\.(tsx?|jsx?)$/, '')
-                if (!ROUTE_FILE_NAMES.has(baseName)) continue
-
-                const relFile = relative(root, full)
-                const routePath = routePrefix || '/'
-                let type = baseName
-
-                if (baseName === 'route') {
-                  type = 'api'
-                  // Parse HTTP methods
-                  const content = readFileSync(full, 'utf-8')
-                  const methods: string[] = []
-                  for (const m of content.matchAll(/export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)/g)) {
-                    methods.push(m[1])
-                  }
-
-                  if (filter === 'all' || filter === 'api') {
-                    routes.push({ path: routePath, file: relFile, type, methods, size: statSync(full).size })
-                  }
-                } else {
-                  if (filter === 'all' || filter === type) {
-                    routes.push({ path: routePath, file: relFile, type, size: statSync(full).size })
-                  }
-                }
-              }
-            }
-          }
-          walkApp(appDir, '')
-        }
-
-        // Pages Router
-        if (pagesDir) {
-          const pageFiles = walkFiles(pagesDir, ['.tsx', '.ts', '.jsx', '.js'])
-          for (const f of pageFiles) {
-            const relFromPages = relative(pagesDir, f)
-            const isApi = relFromPages.startsWith('api/')
-            let routePath = '/' + relFromPages
-              .replace(/\.(tsx?|jsx?)$/, '')
-              .replace(/\/index$/, '')
-              .replace(/\[([^\]]+)\]/g, ':$1')
-            if (routePath === '/') routePath = '/'
-
-            const type = isApi ? 'api' : 'page'
-            if (filter === 'all' || filter === type) {
-              routes.push({
-                path: routePath,
-                file: relative(root, f),
-                type: `${type} (pages-router)`,
-                size: statSync(f).size,
-              })
-            }
-          }
-        }
-
-        return { count: routes.length, routes }
-      },
-    })
+    registerRouteTools(tools, root, appDir, pagesDir)
+    registerBoundaryTools(tools, root, appDir)
+    registerAuthTools(tools, root, appDir, pagesDir)
+    registerUnusedTools(tools, root, appDir, pagesDir)
 
     // ---- Tool: audit_next_config ----
     tools.register({
       name: 'audit_next_config',
       description:
-        'Read and analyze next.config.js/ts — reports security settings, redirects, rewrites, headers, image domains, and flags common misconfigurations.',
-      parameters: {
-        type: 'object',
-        properties: {},
-        required: [],
-      },
+        'Parse next.config.{ts,mjs,js} with the TypeScript AST (unwrapping plugin wrappers like withBundleAnalyzer(config) and phase functions) ' +
+        'into a structured config object, then flag misconfigurations: secrets in `env`, wildcard image remotePatterns, SVG without CSP, ' +
+        'ignored type/lint errors, production source maps, wildcard serverActions.allowedOrigins, and missing security headers.',
+      parameters: { type: 'object', properties: {}, required: [] },
       execute: async () => {
-        let configPath: string | null = null
-        for (const name of ['next.config.ts', 'next.config.mjs', 'next.config.js']) {
-          const p = join(root, name)
-          if (existsSync(p)) { configPath = p; break }
-        }
-        if (!configPath) return { error: 'No next.config file found' }
+        const name = ['next.config.ts', 'next.config.mts', 'next.config.mjs', 'next.config.js', 'next.config.cjs'].find(n => existsSync(join(root, n)))
+        if (!name) return { error: 'No next.config file found' }
+        const sf = parseFile(join(root, name))
+        if (!sf) return { error: `Could not read ${name}` }
+        const obj = findConfigObject(sf)
+        if (!obj) return { file: name, error: 'Could not statically locate the exported config object', content: sf.text.slice(0, 5000) }
 
-        const content = readFileSync(configPath, 'utf-8')
-        const findings: { category: string; detail: string; severity: string }[] = []
+        const config = toValue(sf, obj)
+        const findings: (Finding & { category: string })[] = []
+        const add = (severity: Finding['severity'], category: string, detail: string) => findings.push({ severity, category, detail, file: name })
 
-        // Security checks
-        if (!/poweredByHeader\s*:\s*false/.test(content)) {
-          findings.push({ category: 'security', detail: 'poweredByHeader not set to false — leaks X-Powered-By: Next.js header', severity: 'low' })
-        }
-        if (!/reactStrictMode\s*:\s*true/.test(content)) {
-          findings.push({ category: 'best-practice', detail: 'reactStrictMode not enabled', severity: 'low' })
-        }
-        if (/\benv\s*:/.test(content)) {
-          findings.push({ category: 'security', detail: 'Build-time env vars defined in next.config — check for leaked secrets', severity: 'medium' })
+        if (get(config, 'poweredByHeader') !== false) add('low', 'security', 'poweredByHeader is not false — responses advertise X-Powered-By: Next.js')
+        if (get(config, 'reactStrictMode') === false) add('low', 'best-practice', 'reactStrictMode explicitly disabled')
+
+        const env = get(config, 'env')
+        if (env && typeof env === 'object' && !Array.isArray(env)) {
+          const secretish = Object.keys(env).filter(k => /SECRET|PRIVATE|PASSWORD|TOKEN|SERVICE_ROLE|API_KEY/i.test(k))
+          if (secretish.length) add('high', 'security', `env inlines ${secretish.join(', ')} into the JS bundle at build time — these reach the browser if referenced client-side`)
         }
 
-        // Features detected
-        const features: string[] = []
-        if (/redirects/.test(content)) features.push('redirects')
-        if (/rewrites/.test(content)) features.push('rewrites')
-        if (/headers/.test(content)) features.push('custom-headers')
-        if (/images/.test(content)) features.push('image-optimization')
-        if (/output\s*:\s*['"]standalone['"]/.test(content)) features.push('standalone-output')
-        if (/output\s*:\s*['"]export['"]/.test(content)) features.push('static-export')
-        if (/experimental/.test(content)) features.push('experimental-flags')
-        if (/serverActions/.test(content)) features.push('server-actions-config')
-        if (/webpack/.test(content)) features.push('custom-webpack')
-        if (/basePath/.test(content)) features.push('base-path')
-        if (/i18n/.test(content)) features.push('i18n')
+        const patterns = get(config, 'images.remotePatterns')
+        if (Array.isArray(patterns) && patterns.some(p => typeof p === 'object' && p && !Array.isArray(p) && (get(p, 'hostname') === '**' || get(p, 'hostname') === '*'))) {
+          add('medium', 'security', 'images.remotePatterns allows any hostname — the image optimizer can be used as an open proxy')
+        }
+        if (Array.isArray(get(config, 'images.domains'))) add('low', 'deprecation', 'images.domains is deprecated — use images.remotePatterns')
+        if (get(config, 'images.dangerouslyAllowSVG') === true && get(config, 'images.contentSecurityPolicy') === undefined) {
+          add('medium', 'security', 'images.dangerouslyAllowSVG without images.contentSecurityPolicy — SVGs can carry scripts')
+        }
+        if (get(config, 'typescript.ignoreBuildErrors') === true) add('medium', 'reliability', 'typescript.ignoreBuildErrors ships code that fails type checking')
+        if (get(config, 'eslint.ignoreDuringBuilds') === true) add('low', 'reliability', 'eslint.ignoreDuringBuilds is enabled')
+        if (get(config, 'productionBrowserSourceMaps') === true) add('medium', 'security', 'productionBrowserSourceMaps exposes original source to anyone in production')
 
-        // Server Actions security
-        if (features.includes('server-actions-config')) {
-          if (!/allowedOrigins/.test(content)) {
-            findings.push({ category: 'security', detail: 'serverActions configured but allowedOrigins not set — CSRF risk', severity: 'medium' })
+        for (const path of ['experimental.serverActions.allowedOrigins', 'serverActions.allowedOrigins']) {
+          const origins = get(config, path)
+          if (Array.isArray(origins) && origins.some(o => o === '*' || (typeof o === 'string' && o.startsWith('*')))) {
+            add('medium', 'security', `${path} contains a wildcard — weakens the Origin/Host CSRF check for server actions`)
+          }
+        }
+
+        // Security headers are often built by helpers (e.g. getCspHeader() in lib/csp), so also search the modules
+        // next.config and middleware/proxy import directly.
+        const mw = readMiddleware(root, new Set())
+        const resolver = createResolver(root)
+        const headerSources: { file: string; text: string }[] = [{ file: name, text: JSON.stringify(get(config, 'headers') ?? '') }]
+        for (const entry of [name, mw?.file].filter((f): f is string => !!f)) {
+          const entrySf = parseFile(join(root, entry))
+          if (!entrySf) continue
+          if (entry !== name) headerSources.push({ file: entry, text: entrySf.text })
+          for (const imp of getImports(entrySf)) {
+            if (imp.typeOnly) continue
+            const target = resolver.resolve(imp.specifier, join(root, entry))
+            const importedSf = target ? parseFile(target) : null
+            if (importedSf) headerSources.push({ file: relative(root, target!), text: importedSf.text })
+          }
+        }
+        const securityHeaders: Record<string, string | null> = {}
+        for (const h of ['Content-Security-Policy', 'Strict-Transport-Security', 'X-Content-Type-Options']) {
+          securityHeaders[h] = headerSources.find(src => src.text.includes(h))?.file ?? null
+          if (!securityHeaders[h]) {
+            add('info', 'security', `${h} not found in next.config headers(), ${mw?.file ?? 'middleware/proxy'}, or the modules they import` +
+              (h === 'Strict-Transport-Security' ? ' — Vercel and many hosts add HSTS automatically' : ''))
           }
         }
 
         return {
-          file: relative(root, configPath),
-          size: content.length,
-          features,
+          file: name,
+          next_version: nextVersion(root),
+          keys: Object.keys(config as object),
+          security_headers_found_in: securityHeaders,
+          config,
           findings,
-          content: content.slice(0, 5000),
         }
       },
     })
@@ -210,114 +205,50 @@ export const nextjsStack: StackAdapter = {
     tools.register({
       name: 'analyze_middleware',
       description:
-        'Find and analyze Next.js middleware/proxy — shows matcher config, auth patterns, redirect/rewrite logic, and flags missing auth.',
-      parameters: {
-        type: 'object',
-        properties: {},
-        required: [],
-      },
+        'Analyze middleware.ts / proxy.ts via the AST: parsed matcher config (string, array, or { source } objects), auth logic, ' +
+        'redirect/rewrite usage, and — by evaluating each matcher against the real App Router route list — exactly which pages and ' +
+        'route handlers the middleware runs on and which it skips.',
+      parameters: { type: 'object', properties: {}, required: [] },
       execute: async () => {
-        const candidates = [
-          'middleware.ts', 'middleware.js', 'src/middleware.ts', 'src/middleware.js',
-          'proxy.ts', 'proxy.js', 'src/proxy.ts', 'src/proxy.js',
-        ]
-        let filePath: string | null = null
-        for (const c of candidates) {
-          const p = join(root, c)
-          if (existsSync(p)) { filePath = p; break }
+        const mw = readMiddleware(root, new Set(['auth', 'getToken', 'getSession', 'getUser', 'verifySession', 'jwtVerify', 'verify']))
+        const major = majorVersion(nextVersion(root))
+        if (!mw) return { exists: false, note: `No ${major && major >= 16 ? 'proxy' : 'middleware'} file found in project root or src/` }
+
+        const sf = parseFile(join(root, mw.file))!
+        const responses: { call: string; line: number }[] = []
+        const visit = (n: ts.Node): void => {
+          if (ts.isCallExpression(n) && /^(NextResponse|Response)\.(redirect|rewrite|next|json)$/.test(n.expression.getText(sf))) {
+            responses.push({ call: n.expression.getText(sf), line: lineOf(sf, n) })
+          }
+          ts.forEachChild(n, visit)
         }
+        visit(sf)
 
-        if (!filePath) return { exists: false, note: 'No middleware or proxy file found' }
+        const routes = appDir ? resolveAppRoutes(root, buildAppTree(appDir)).filter(r => r.type === 'page' || r.type === 'route') : []
+        const covered = routes.filter(r => mw.matchers === null || mw.matchers.some(m => matcherMatches(m, r.path)))
+        const skipped = routes.filter(r => !covered.includes(r))
 
-        const content = readFileSync(filePath, 'utf-8')
-        const relPath = relative(root, filePath)
-
-        // Extract matcher config
-        const matcherMatch = content.match(/export\s+const\s+config\s*=\s*\{[\s\S]*?matcher\s*:\s*(\[[\s\S]*?\]|'[^']*'|"[^"]*")/)
-        const matcher = matcherMatch ? matcherMatch[1].trim() : null
-
-        // Detect patterns
-        const patterns: string[] = []
-        if (/\bcookies\b/.test(content)) patterns.push('reads-cookies')
-        if (/\bheaders\b/.test(content)) patterns.push('reads-headers')
-        if (/\bauth\b/i.test(content)) patterns.push('auth-check')
-        if (/NextResponse\.redirect/.test(content)) patterns.push('redirect')
-        if (/NextResponse\.rewrite/.test(content)) patterns.push('rewrite')
-        if (/NextResponse\.next/.test(content)) patterns.push('pass-through')
-        if (/Access-Control/.test(content)) patterns.push('cors')
-        if (/Content-Security-Policy/.test(content)) patterns.push('csp')
-        if (/token|jwt|bearer/i.test(content)) patterns.push('token-validation')
-
-        const findings: { detail: string; severity: string }[] = []
-        if (!patterns.includes('auth-check') && !patterns.includes('token-validation') && !patterns.includes('reads-cookies')) {
-          findings.push({ detail: 'Middleware has no apparent auth logic — may not be protecting routes', severity: 'info' })
+        const findings: Finding[] = []
+        if (mw.matchers === null) findings.push({ severity: 'low', detail: 'No matcher — runs on every request including static assets and images', file: mw.file })
+        if (!mw.hasAuthLogic) findings.push({ severity: 'info', detail: 'No recognizable auth logic in middleware', file: mw.file })
+        if (mw.kind === 'middleware' && major !== null && major >= 16) {
+          findings.push({ severity: 'low', detail: 'Next.js 16 renamed middleware to proxy — rename the file to proxy.ts and the export to proxy', file: mw.file })
+        }
+        const skippedRoutes = skipped.filter(r => r.type === 'route')
+        if (mw.hasAuthLogic && skippedRoutes.length) {
+          findings.push({ severity: 'info', detail: `Route handlers not matched by middleware (need their own auth): ${skippedRoutes.map(r => r.path).join(', ')}` })
         }
 
         return {
-          file: relPath,
-          size: content.length,
-          matcher,
-          patterns,
+          file: mw.file,
+          kind: mw.kind,
+          matchers: mw.matchers,
+          auth_signals: mw.signals,
+          has_auth_logic: mw.hasAuthLogic,
+          responses,
+          runs_on: covered.map(r => `${r.type === 'route' ? 'API' : 'page'} ${r.path}`),
+          skips: skipped.map(r => `${r.type === 'route' ? 'API' : 'page'} ${r.path}`),
           findings,
-          content: content.slice(0, 5000),
-        }
-      },
-    })
-
-    // ---- Tool: find_server_actions ----
-    tools.register({
-      name: 'find_server_actions',
-      description:
-        'Scan for all "use server" directives — both file-level server action modules and inline server functions. ' +
-        'Flags actions that lack auth checks.',
-      parameters: {
-        type: 'object',
-        properties: {},
-        required: [],
-      },
-      execute: async () => {
-        const srcDir = existsSync(join(root, 'src')) ? join(root, 'src') : root
-        const files = walkFiles(srcDir, ['.ts', '.tsx', '.js', '.jsx'])
-
-        const actions: { file: string; type: string; functions: string[]; has_auth: boolean }[] = []
-
-        for (const filePath of files) {
-          let content: string
-          try { content = readFileSync(filePath, 'utf-8') } catch { continue }
-          const relPath = relative(root, filePath)
-
-          // File-level 'use server'
-          if (/^(['"])use server\1/m.test(content)) {
-            const fns: string[] = []
-            for (const m of content.matchAll(/export\s+(?:async\s+)?function\s+(\w+)/g)) {
-              fns.push(m[1])
-            }
-
-            const hasAuth = /\bauth\(\)|getSession|cookies\(\)|getServerSession|currentUser/i.test(content)
-
-            actions.push({ file: relPath, type: 'file-level', functions: fns, has_auth: hasAuth })
-          }
-
-          // Inline 'use server' inside functions
-          const inlineRegex = /(?:async\s+function\s+(\w+)|const\s+(\w+)\s*=\s*async)\s*\([^)]*\)\s*\{[\s\n]*['"]use server['"]/g
-          const inlineFns: string[] = []
-          for (const m of content.matchAll(inlineRegex)) {
-            inlineFns.push(m[1] || m[2])
-          }
-          if (inlineFns.length > 0) {
-            const hasAuth = /\bauth\(\)|getSession|cookies\(\)|getServerSession|currentUser/i.test(content)
-            actions.push({ file: relPath, type: 'inline', functions: inlineFns, has_auth: hasAuth })
-          }
-        }
-
-        const unprotected = actions.filter(a => !a.has_auth)
-
-        return {
-          count: actions.length,
-          actions,
-          findings: unprotected.length > 0
-            ? [{ detail: `${unprotected.length} server action file(s) have no apparent auth checks`, severity: 'medium', files: unprotected.map(a => a.file) }]
-            : [],
         }
       },
     })
@@ -326,65 +257,85 @@ export const nextjsStack: StackAdapter = {
     tools.register({
       name: 'audit_env_files',
       description:
-        'Scan all .env* files for potential security issues — leaked secrets in NEXT_PUBLIC_ vars, ' +
-        'missing .gitignore entries, and env file inventory.',
-      parameters: {
-        type: 'object',
-        properties: {},
-        required: [],
-      },
+        'Inventory .env* files and flag secret-looking NEXT_PUBLIC_ variables (inlined into the browser bundle), env files not covered by .gitignore, ' +
+        'and NEXT_PUBLIC_ variables referenced in code but defined in no env file.',
+      parameters: { type: 'object', properties: {}, required: [] },
       execute: async () => {
         const envFileNames = [
           '.env', '.env.local', '.env.development', '.env.development.local',
           '.env.production', '.env.production.local', '.env.test', '.env.test.local',
         ]
-
-        const envFiles: { file: string; vars: number; public_vars: string[]; suspicious: string[] }[] = []
-
-        for (const name of envFileNames) {
-          const p = join(root, name)
-          if (!existsSync(p)) continue
-          const content = readFileSync(p, 'utf-8')
-          const lines = content.split('\n').filter(l => l.trim() && !l.trim().startsWith('#'))
-
-          const publicVars: string[] = []
-          const suspicious: string[] = []
-
-          for (const line of lines) {
-            const eqIdx = line.indexOf('=')
-            if (eqIdx === -1) continue
-            const key = line.slice(0, eqIdx).trim()
-
-            if (key.startsWith('NEXT_PUBLIC_')) {
-              publicVars.push(key)
-              if (/SECRET|KEY|TOKEN|PASSWORD|PRIVATE|CREDENTIALS/i.test(key)) {
-                suspicious.push(key)
-              }
-            }
-          }
-
-          envFiles.push({ file: name, vars: lines.length, public_vars: publicVars, suspicious })
-        }
-
-        // Check gitignore
-        let gitignoreContent = ''
-        try { gitignoreContent = readFileSync(join(root, '.gitignore'), 'utf-8') } catch {}
-        const gitignoreFindings: string[] = []
-        for (const name of ['.env', '.env.local', '.env*.local']) {
-          if (!gitignoreContent.includes(name)) {
-            gitignoreFindings.push(`${name} not in .gitignore`)
+        const templateNames = ['.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.dist']
+        // In a monorepo, env files often live at the workspace root (loaded via dotenv-cli, turbo, or a symlink)
+        const workspaceRoot = findWorkspace(root)?.root
+        const dirs = [root, ...(workspaceRoot && workspaceRoot !== root ? [workspaceRoot] : [])]
+        const envFiles: { file: string; template: boolean; vars: string[]; public_vars: string[]; suspicious: string[] }[] = []
+        const defined = new Set<string>()
+        for (const dir of dirs) {
+          for (const name of [...envFileNames, ...templateNames]) {
+            const p = join(dir, name)
+            if (!existsSync(p)) continue
+            const vars = readFileSync(p, 'utf-8').split('\n')
+              .map(l => l.trim().replace(/^export\s+/, ''))
+              .filter(l => l && !l.startsWith('#') && l.includes('='))
+              .map(l => l.slice(0, l.indexOf('=')).trim())
+            vars.forEach(v => defined.add(v))
+            const pub = vars.filter(v => v.startsWith('NEXT_PUBLIC_'))
+            envFiles.push({
+              file: relative(root, p),
+              template: templateNames.includes(name),
+              vars,
+              public_vars: pub,
+              // Bare _KEY/_TOKEN/_SITEKEY names are usually public client keys (analytics, captcha, publishable), so only
+              // names that say secret/private/admin-level are flagged
+              suspicious: pub.filter(v => SECRET_ENV_NAME.test(v.slice(12))),
+            })
           }
         }
 
-        const allSuspicious = envFiles.flatMap(f => f.suspicious)
+        const gitignore = existsSync(join(root, '.gitignore')) ? readFileSync(join(root, '.gitignore'), 'utf-8').split('\n').map(l => l.trim()) : []
+        const ignored = (name: string) => gitignore.some(g => {
+          if (!g || g.startsWith('#')) return false
+          const re = new RegExp('^/?' + g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$')
+          return re.test(name)
+        })
 
-        return {
-          env_files: envFiles,
-          gitignore_findings: gitignoreFindings,
-          findings: allSuspicious.length > 0
-            ? [{ detail: `Potentially sensitive NEXT_PUBLIC_ vars: ${allSuspicious.join(', ')}`, severity: 'high' }]
-            : [],
+        const findings: Finding[] = []
+        for (const f of envFiles) {
+          if (f.suspicious.length) {
+            findings.push({
+              severity: 'high',
+              detail: f.template
+                ? `Template defines secret-looking public vars ${f.suspicious.join(', ')} — any deployment that fills them in ships them to the browser`
+                : `Secret-looking public vars are shipped to the browser: ${f.suspicious.join(', ')}`,
+              file: f.file,
+            })
+          }
+          // .gitignore is checked relative to the app, so only for env files in the app directory itself
+          if (!f.template && !f.file.includes('/') && f.file.endsWith('.local') && !ignored(f.file)) {
+            findings.push({ severity: 'high', detail: `${f.file} is not covered by .gitignore`, file: f.file })
+          }
         }
+
+        // NEXT_PUBLIC_ references in code with no definition
+        const referenced = new Set<string>()
+        const srcRoots = [findDir(root, ['src']) ?? root]
+        for (const dir of srcRoots) {
+          for (const file of walkFiles(dir, ['.ts', '.tsx', '.js', '.jsx'])) {
+            for (const m of (readFileSync(file, 'utf-8').match(/process\.env\.(NEXT_PUBLIC_\w+)/g) ?? [])) referenced.add(m.slice(12))
+          }
+        }
+        const missing = [...referenced].filter(v => !defined.has(v))
+        if (envFiles.length && missing.length) {
+          findings.push({ severity: 'low', detail: `NEXT_PUBLIC_ vars referenced in code but not defined in any .env file (inlined as undefined at build): ${missing.join(', ')}` })
+        }
+
+        const note = envFiles.length === 0
+          ? `No .env files or templates found in ${dirs.map(d => relative(root, d) || '.').join(' or ')}`
+          : envFiles.every(f => f.template)
+            ? 'Only env templates found — real values are likely supplied by the host; results are based on the templates'
+            : undefined
+        return { env_files: envFiles, ...(note ? { note } : {}), findings }
       },
     })
 
@@ -392,67 +343,109 @@ export const nextjsStack: StackAdapter = {
     tools.register({
       name: 'analyze_data_fetching',
       description:
-        'Scan pages and layouts for data fetching patterns — generateStaticParams, generateMetadata, ' +
-        'fetch with cache/revalidate, "use cache" directives, and React.cache usage.',
+        'Per-route rendering and caching analysis from the AST. For every App Router page, layout, and route handler: route segment config, ' +
+        'fetch() calls with their cache / next.revalidate / next.tags options, \'use cache\' (file or function level), cacheLife/cacheTag, ' +
+        'unstable_cache, React cache(), and dynamic API usage (cookies, headers, draftMode, connection, searchParams) — with an inferred ' +
+        'rendering mode. Analysis is per file; data helpers in imported modules are not followed.',
       parameters: {
         type: 'object',
-        properties: {},
+        properties: { path: { type: 'string', description: 'Only include routes under this URL prefix (optional)' } },
         required: [],
       },
-      execute: async () => {
+      execute: async (args: { path?: string }) => {
         if (!appDir) return { error: 'No app/ directory found' }
-
-        const routeFiles = walkFiles(appDir, ['.tsx', '.ts', '.jsx', '.js'])
-          .filter(f => {
-            const name = (f.split('/').pop() ?? '').replace(/\.(tsx?|jsx?)$/, '')
-            return ROUTE_FILE_NAMES.has(name)
-          })
-
-        const pages: {
-          file: string
-          type: string
-          patterns: string[]
-          cache_strategy: string | null
-          revalidate: string | null
+        const results: {
+          path: string; file: string
+          segment_config: Record<string, string | number | boolean>
+          fetches: { line: number; url: string; cache: string | null; revalidate: string | null; tags: string | null }[]
+          caching: string[]
+          dynamic_apis: string[]
+          rendering: string
         }[] = []
 
-        for (const filePath of routeFiles) {
-          let content: string
-          try { content = readFileSync(filePath, 'utf-8') } catch { continue }
-          const relPath = relative(root, filePath)
-          const baseName = (filePath.split('/').pop() ?? '').replace(/\.(tsx?|jsx?)$/, '')
+        const tree = buildAppTree(appDir)
+        const seen = new Set<string>()
+        const targets: { path: string; file: string }[] = []
+        for (const r of resolveAppRoutes(root, tree)) {
+          if (args.path && !r.path.startsWith(args.path)) continue
+          for (const f of [r.file, ...r.layouts]) if (!seen.has(f)) { seen.add(f); targets.push({ path: r.path, file: f }) }
+        }
 
-          const patterns: string[] = []
+        for (const t of targets) {
+          const sf = parseFile(join(root, t.file))
+          if (!sf || /\.mdx?$/.test(t.file)) continue
+          const segment: Record<string, string | number | boolean> = {}
+          for (const key of ['dynamic', 'dynamicParams', 'revalidate', 'fetchCache', 'runtime']) {
+            const v = literalExport(sf, key)
+            if (v !== null) segment[key] = v
+          }
+          const caching = new Set<string>()
+          const dynamicApis = new Set<string>()
+          const fetches: (typeof results)[number]['fetches'] = []
 
-          if (/export\s+(?:async\s+)?function\s+generateStaticParams/.test(content)) patterns.push('generateStaticParams')
-          if (/export\s+(?:async\s+)?function\s+generateMetadata/.test(content)) patterns.push('generateMetadata')
-          if (/export\s+const\s+metadata\s*[=:]/.test(content)) patterns.push('static-metadata')
-          if (/['"]use cache['"]/.test(content)) patterns.push('use-cache')
-          if (/cacheLife\(/.test(content)) patterns.push('cacheLife')
-          if (/cacheTag\(/.test(content)) patterns.push('cacheTag')
-          if (/React\.cache\(|import\s+\{\s*cache\s*\}\s+from\s+['"]react['"]/.test(content)) patterns.push('react-cache')
+          if (fileDirective(sf) === 'use cache') caching.add("'use cache' (file)")
+          const nextHeadersLocals = new Set<string>()
+          for (const imp of getImports(sf)) {
+            if (imp.specifier === 'react' && imp.names.includes('cache')) caching.add('React cache()')
+            if (imp.specifier === 'next/headers' || imp.specifier === 'next/server') imp.names.forEach(n => nextHeadersLocals.add(n))
+          }
 
-          // Route segment config
-          let cacheStrategy: string | null = null
-          let revalidate: string | null = null
-          const dynamicMatch = content.match(/export\s+const\s+dynamic\s*=\s*['"]([^'"]+)['"]/)
-          if (dynamicMatch) cacheStrategy = dynamicMatch[1]
-          const revalidateMatch = content.match(/export\s+const\s+revalidate\s*=\s*(\w+)/)
-          if (revalidateMatch) revalidate = revalidateMatch[1]
-          const runtimeMatch = content.match(/export\s+const\s+runtime\s*=\s*['"]([^'"]+)['"]/)
-          if (runtimeMatch) patterns.push(`runtime:${runtimeMatch[1]}`)
+          const visit = (n: ts.Node): void => {
+            if ((ts.isFunctionDeclaration(n) || ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && bodyDirectives(n).some(d => d.startsWith('use cache'))) {
+              caching.add(`'${bodyDirectives(n).find(d => d.startsWith('use cache'))}' (function)`)
+            }
+            if (ts.isCallExpression(n)) {
+              const callee = n.expression.getText(sf)
+              if (callee === 'fetch') {
+                const opts = n.arguments[1]
+                const prop = (o: ts.Expression | undefined, key: string): ts.Expression | undefined =>
+                  o && ts.isObjectLiteralExpression(o)
+                    ? (o.properties.find(p => ts.isPropertyAssignment(p) && p.name.getText(sf) === key) as ts.PropertyAssignment | undefined)?.initializer
+                    : undefined
+                const next = prop(opts, 'next')
+                fetches.push({
+                  line: lineOf(sf, n),
+                  url: n.arguments[0]?.getText(sf).slice(0, 120) ?? '',
+                  cache: prop(opts, 'cache')?.getText(sf) ?? null,
+                  revalidate: prop(next, 'revalidate')?.getText(sf) ?? null,
+                  tags: prop(next, 'tags')?.getText(sf) ?? null,
+                })
+              }
+              if (['cacheLife', 'unstable_cacheLife', 'cacheTag', 'unstable_cacheTag', 'unstable_cache', 'revalidateTag', 'revalidatePath', 'updateTag'].includes(callee)) caching.add(`${callee}()`)
+              if (['cookies', 'headers', 'draftMode', 'connection'].includes(callee) && nextHeadersLocals.has(callee)) dynamicApis.add(`${callee}()`)
+            }
+            if (ts.isIdentifier(n) && n.text === 'searchParams' && ts.isBindingElement(n.parent)) dynamicApis.add('searchParams')
+            if (ts.isPropertyAccessExpression(n) && n.name.text === 'searchParams' && n.expression.getText(sf) === 'props') dynamicApis.add('searchParams')
+            ts.forEachChild(n, visit)
+          }
+          visit(sf)
 
-          // Fetch patterns
-          if (/fetch\([^)]*cache\s*:\s*['"]force-cache['"]/.test(content)) patterns.push('fetch-cached')
-          if (/fetch\([^)]*cache\s*:\s*['"]no-store['"]/.test(content)) patterns.push('fetch-no-store')
-          if (/fetch\([^)]*revalidate\s*:/.test(content)) patterns.push('fetch-isr')
+          const noStore = fetches.some(f => /no-store/.test(f.cache ?? '') || f.revalidate === '0')
+          const rendering =
+            segment.dynamic === 'force-dynamic' || dynamicApis.size || noStore ? 'dynamic (per request)'
+            : segment.dynamic === 'force-static' || segment.dynamic === 'error' ? 'static (forced)'
+            : typeof segment.revalidate === 'number' && segment.revalidate > 0 ? `ISR (revalidate ${segment.revalidate}s)`
+            : 'static unless an imported module uses dynamic APIs'
 
-          if (patterns.length > 0 || cacheStrategy || revalidate) {
-            pages.push({ file: relPath, type: baseName, patterns, cache_strategy: cacheStrategy, revalidate })
+          if (Object.keys(segment).length || fetches.length || caching.size || dynamicApis.size) {
+            results.push({ path: t.path, file: t.file, segment_config: segment, fetches, caching: [...caching], dynamic_apis: [...dynamicApis], rendering })
           }
         }
 
-        return { count: pages.length, pages }
+        const findings: Finding[] = []
+        for (const r of results) {
+          if (r.segment_config.dynamic === 'force-static' && r.dynamic_apis.length) {
+            findings.push({ severity: 'medium', detail: `dynamic = 'force-static' but uses ${r.dynamic_apis.join(', ')} — these return empty values at build time`, file: r.file })
+          }
+          if (r.segment_config.dynamic === 'error' && r.dynamic_apis.length) {
+            findings.push({ severity: 'high', detail: `dynamic = 'error' with ${r.dynamic_apis.join(', ')} — the build will fail`, file: r.file })
+          }
+          const major = majorVersion(nextVersion(root))
+          if (major !== null && major >= 15 && r.fetches.some(f => f.cache === null && f.revalidate === null) && !r.segment_config.revalidate && !r.caching.length) {
+            findings.push({ severity: 'info', detail: `fetch() without cache options is uncached by default since Next.js 15`, file: r.file })
+          }
+        }
+        return { count: results.length, files: results, findings }
       },
     })
   },

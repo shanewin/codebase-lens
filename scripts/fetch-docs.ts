@@ -85,52 +85,7 @@ const NEXT_JS_DOCS: StackDocs = {
   },
 }
 
-const SUPABASE_DOCS: StackDocs = {
-  name: 'supabase',
-  sources: [
-    { url: 'https://supabase.com/docs/guides/auth', label: 'Authentication' },
-    { url: 'https://supabase.com/docs/guides/database/overview', label: 'Database' },
-    { url: 'https://supabase.com/docs/guides/auth/row-level-security', label: 'Row Level Security' },
-    { url: 'https://supabase.com/docs/guides/storage', label: 'Storage' },
-    { url: 'https://supabase.com/docs/guides/functions', label: 'Edge Functions' },
-  ],
-  transform(responses) {
-    const header = `# Supabase Documentation (auto-fetched)\n\nFetched: ${new Date().toISOString().split('T')[0]}\n\n`
-    const sections = responses.map(r => `## ${r.label}\n\n${extractTextFromHtml(r.text)}\n`)
-    return header + sections.join('\n---\n\n')
-  },
-}
-
-const EXPO_DOCS: StackDocs = {
-  name: 'expo',
-  sources: [
-    { url: 'https://docs.expo.dev/router/introduction/', label: 'Expo Router' },
-    { url: 'https://docs.expo.dev/develop/development-builds/introduction/', label: 'Development Builds' },
-    { url: 'https://docs.expo.dev/build/introduction/', label: 'EAS Build' },
-  ],
-  transform(responses) {
-    const header = `# Expo Documentation (auto-fetched)\n\nFetched: ${new Date().toISOString().split('T')[0]}\n\n`
-    const sections = responses.map(r => `## ${r.label}\n\n${extractTextFromHtml(r.text)}\n`)
-    return header + sections.join('\n---\n\n')
-  },
-}
-
-const REACT_QUERY_DOCS: StackDocs = {
-  name: 'react-query',
-  sources: [
-    { url: 'https://tanstack.com/query/latest/docs/framework/react/overview', label: 'Overview' },
-    { url: 'https://tanstack.com/query/latest/docs/framework/react/guides/queries', label: 'Queries' },
-    { url: 'https://tanstack.com/query/latest/docs/framework/react/guides/mutations', label: 'Mutations' },
-    { url: 'https://tanstack.com/query/latest/docs/framework/react/guides/query-invalidation', label: 'Query Invalidation' },
-  ],
-  transform(responses) {
-    const header = `# React Query Documentation (auto-fetched)\n\nFetched: ${new Date().toISOString().split('T')[0]}\n\n`
-    const sections = responses.map(r => `## ${r.label}\n\n${extractTextFromHtml(r.text)}\n`)
-    return header + sections.join('\n---\n\n')
-  },
-}
-
-const ALL_STACKS: StackDocs[] = [NEXT_JS_DOCS, SUPABASE_DOCS, EXPO_DOCS, REACT_QUERY_DOCS]
+const ALL_STACKS: StackDocs[] = [NEXT_JS_DOCS]
 
 // ---------------------------------------------------------------------------
 // Main

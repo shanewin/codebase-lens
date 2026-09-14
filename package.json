@@ -1,7 +1,7 @@
 {
   "name": "codebase-lens",
   "version": "0.1.0",
-  "description": "MCP server that gives Claude Code deep codebase intelligence — auto-detects your stack and provides analysis tools for migrations, security, routing, data flows, and more.",
+  "description": "MCP server that gives Claude Code deep Next.js intelligence — AST-based route trees, server/client boundaries, auth coverage, and dead export detection.",
   "type": "module",
   "main": "dist/server.js",
   "bin": {
@@ -20,18 +20,18 @@
     "claude",
     "codebase",
     "analysis",
-    "supabase",
-    "expo",
-    "react-native",
-    "react-query"
+    "nextjs",
+    "next.js",
+    "app-router",
+    "server-components"
   ],
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "typescript": "^5.5.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.5.0"
+    "@types/node": "^22.0.0"
   }
 }

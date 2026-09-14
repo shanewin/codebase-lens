@@ -1,33 +1,18 @@
 # codebase-lens
 
-An MCP server that gives Claude Code (or any MCP client) deep codebase intelligence. Point it at any project and it auto-detects your stack, then loads the right analysis tools — SQL migration parsing, RLS security auditing, route mapping, data flow tracing, and more.
+An MCP server that gives Claude Code (or any MCP client) deep insight into Next.js projects.
+
+Claude can read a `page.tsx` file on its own. What it can't easily do is hold the whole app in its head: which layout wraps which page, where `'use client'` pulls a subtree into the browser bundle, which route handlers skip auth, or which exports nothing imports. codebase-lens parses your project with the TypeScript compiler API and answers those questions directly.
 
 ## How it works
 
 ```
-Your Project
+Your Next.js project
     ↓ PROJECT_PATH
 codebase-lens (MCP server over stdio)
-    ├── Generic Scanners (always loaded)
-    │   ├── list_project_files
-    │   ├── read_file
-    │   ├── search_content
-    │   ├── trace_imports
-    │   └── search_styles
-    │
-    ├── Stack Adapters (auto-detected)
-    │   ├── Next.js  → list_routes, audit_next_config, analyze_middleware, ...
-    │   ├── Supabase → list_tables, trace_foreign_keys, list_rls_policies, ...
-    │   ├── Expo/RN  → list_screens, list_components, read_component
-    │   └── React Query → list_hooks, trace_query_invalidation
-    │
-    ├── Knowledge (per-stack docs + community best practices)
-    │   ├── Auto-fetched official docs (npm run fetch-docs)
-    │   └── Community-maintained gotchas and patterns
-    │
-    └── Flow Tracer (cross-stack)
-        ├── trace_screen_flow (screen → hook → RPC → table → RLS)
-        └── audit_all_flows (project-wide health check)
+    ├── Next.js tools (AST-based, loaded when Next.js is detected)
+    ├── Generic scanners (files, search, imports, styles)
+    └── Knowledge resources (official docs + community gotchas)
 ```
 
 ## Quick Start
@@ -38,7 +23,7 @@ codebase-lens (MCP server over stdio)
 git clone https://github.com/YOUR_USERNAME/codebase-lens.git
 cd codebase-lens
 npm install
-npm run fetch-docs   # pull official docs for all stacks (optional, recommended)
+npm run fetch-docs   # pull the latest Next.js docs (optional, recommended)
 npm run build
 ```
 
@@ -60,17 +45,43 @@ Create `.mcp.json` in your project root:
 }
 ```
 
+In a monorepo, point `PROJECT_PATH` at the repo root: codebase-lens analyzes the Next.js app with the most routes. To choose a different app, set `"CODEBASE_LENS_APP": "apps/admin"` (a path relative to `PROJECT_PATH`) in `env`.
+
 ### 3. Use it
 
-Open Claude Code in your project. The tools are automatically available. Try:
+Open Claude Code in your project. The tools are available automatically. Try:
 
-- "List all my database tables and their columns"
-- "Trace the data flow from the discover screen to the database"
-- "Which tables are missing RLS policies?"
-- "Show me all hardcoded colors that aren't in my theme"
-- "Audit all screen data flows for security gaps"
+- "Show me the route tree with which layouts and error boundaries apply to each page"
+- "Where does 'use client' pull server code into the client bundle?"
+- "Which API route handlers don't check auth?"
+- "Find exports nothing imports"
+- "Audit my next.config and middleware for security issues"
 
 ## Tools Reference
+
+### Next.js (loaded when `next.config.*` exists or `next` is in package.json)
+
+Every tool parses source with the TypeScript compiler API (`ts.createSourceFile`), not regex. That means it handles multi-line exports, `export const GET = withAuth(...)`, `export { handler as POST }`, re-export barrels, and tsconfig path aliases.
+
+**Whole-app analysis**
+
+| Tool | What it does |
+|------|-------------|
+| `get_route_tree` | App Router segment tree with inheritance resolved: the layout chain, templates, and the loading / error / not-found boundary that actually applies to each page, plus merged route segment config. Flags page+route conflicts, error boundaries without `'use client'`, parallel slots without `default`, missing root layouts, and route groups that collide on the same URL. |
+| `map_client_boundaries` | Walks the real import graph from every page and layout to find where `'use client'` starts the client tree. Reports which files ship to the browser, which stay on the server, and which run in both. Flags server-only code (`server-only`, Node builtins, DB/secret SDKs) in the client bundle with the full import chain, private `process.env` reads in client code, and hooks used in Server Components. Pass `file` to see why one file runs where it does. |
+| `audit_route_auth` | Per-method auth coverage for every route handler and Pages API route: auth calls, auth wrappers, header checks, and webhook signature checks, following same-file helpers. Evaluates the middleware/proxy matcher against real routes to separate endpoints protected in the handler, protected only by middleware, and unprotected. |
+| `find_unused_exports` | Dead exports and unimported files. Follows barrel re-exports and dynamic imports, and ignores the exports Next.js consumes by convention (default exports, `metadata`, `generateStaticParams`, HTTP handlers, segment config, …). |
+
+**Focused audits**
+
+| Tool | What it does |
+|------|-------------|
+| `list_routes` | Flat list of App Router + Pages Router routes with HTTP methods |
+| `find_server_actions` | Every server action (module-level and inline `'use server'`) with auth checks, input validation, and importers |
+| `analyze_middleware` | Parsed matcher config, auth logic, and exactly which routes middleware/proxy runs on and which it skips |
+| `analyze_data_fetching` | Per-route segment config, `fetch` cache options, `'use cache'`, `cacheLife`/`cacheTag`, dynamic APIs, and the inferred rendering mode |
+| `audit_next_config` | Statically evaluates next.config (unwrapping plugin wrappers) and flags secrets in `env`, wildcard image hosts, ignored build errors, source maps, and missing security headers |
+| `audit_env_files` | Secret-looking `NEXT_PUBLIC_` vars, env files not covered by .gitignore, and public vars used in code but defined nowhere |
 
 ### Generic (always available)
 
@@ -79,163 +90,34 @@ Open Claude Code in your project. The tools are automatically available. Try:
 | `list_project_files` | List files matching extensions with sizes |
 | `read_file` | Read any file (100KB limit) |
 | `search_content` | Regex search across the codebase |
-| `trace_imports` | Build dependency graph from any file |
+| `trace_imports` | Build a dependency graph from any file |
 | `search_styles` | Find hardcoded colors/spacing escaping the design system |
 
-### Next.js (auto-detected from `next.config.*` or `next` in package.json)
+## Knowledge Resources
 
-| Tool | What it does |
-|------|-------------|
-| `list_routes` | Map all App Router + Pages Router routes with types and HTTP methods |
-| `audit_next_config` | Analyze next.config for security, features, and misconfigurations |
-| `analyze_middleware` | Find and audit middleware/proxy — matcher, auth patterns, gaps |
-| `find_server_actions` | Scan for `'use server'` directives, flag unprotected actions |
-| `audit_env_files` | Check `.env*` files for leaked secrets in `NEXT_PUBLIC_` vars |
-| `analyze_data_fetching` | Map data fetching patterns — ISR, SSR, SSG, caching strategies |
+Two Markdown files are exposed as MCP resources that Claude can read:
 
-### Supabase (auto-detected when `supabase/` exists)
-
-| Tool | What it does |
-|------|-------------|
-| `list_tables` | Parse migrations for all CREATE TABLE + ALTER TABLE ADD COLUMN |
-| `trace_foreign_keys` | Extract all FK relationships between tables |
-| `read_migration` | Read a specific migration or list all |
-| `list_rls_policies` | Extract all RLS policies with tables and operations |
-| `audit_table_security` | Full security audit: RLS, policies, grants, revokes for one table |
-| `diff_rls_coverage` | Compare CREATE TABLE vs ENABLE RLS — find missing/late RLS |
-| `list_rpc_functions` | Extract SQL functions with SECURITY DEFINER status and table touches |
-
-### Expo / React Native (auto-detected from package.json)
-
-| Tool | What it does |
-|------|-------------|
-| `list_screens` | Map file-based routes (Expo Router conventions) |
-| `list_components` | List shared components with exports |
-| `read_component` | Read any file from src/ |
-
-### React Query (auto-detected from package.json)
-
-| Tool | What it does |
-|------|-------------|
-| `list_hooks` | Parse hook files for query keys, invalidation targets, table access |
-| `trace_query_invalidation` | Find orphan invalidations and missing cache busts |
-
-### Flow Tracer (cross-stack, loaded when both frontend + backend detected)
-
-| Tool | What it does |
-|------|-------------|
-| `trace_screen_flow` | End-to-end: screen → hooks → RPCs/tables → RLS policies |
-| `audit_all_flows` | Project-wide: every screen's flow, orphan hooks, security gaps |
-
-## Knowledge System
-
-Each stack can ship with two types of knowledge files that Claude can read as MCP resources:
-
-### Auto-fetched docs (`docs.md`)
-Official documentation pulled at build time. Run `npm run fetch-docs` to update all stacks, or `npm run fetch-docs:nextjs` for just one.
-
-These are auto-generated — don't edit them. They refresh every time you run the fetch script.
-
-### Community knowledge (`community.md`)
-Human-maintained best practices, security checklists, common gotchas, and patterns that official docs don't cover well. **This is where contributors add value.** PRs welcome.
-
-```
-knowledge/
-├── nextjs/
-│   ├── docs.md          ← auto-fetched from nextjs.org
-│   └── community.md     ← maintained by contributors
-├── supabase/
-│   ├── docs.md
-│   └── community.md
-└── ...
-```
-
-Knowledge files are only served for detected stacks — a Django project won't see Next.js knowledge.
-
-## Adding a New Stack Adapter
-
-Create a file in `src/stacks/` that exports a `StackAdapter`:
-
-```typescript
-import type { StackAdapter, ToolCollector } from '../core/types.js'
-
-export const djangoStack: StackAdapter = {
-  name: 'django',
-
-  detect(root: string): boolean {
-    // Return true if this stack is present
-    return existsSync(join(root, 'manage.py'))
-  },
-
-  register(tools: ToolCollector, root: string): void {
-    // Register your tools
-    tools.register({
-      name: 'list_django_models',
-      description: 'Parse models.py files and list all Django models with fields',
-      parameters: { type: 'object', properties: {}, required: [] },
-      execute: async () => {
-        // Your analysis logic here
-      },
-    })
-  },
-}
-```
-
-Then add it to `src/core/detect.ts`:
-
-```typescript
-import { djangoStack } from '../stacks/django.js'
-
-const ALL_STACKS: StackAdapter[] = [
-  supabaseStack,
-  expoStack,
-  reactQueryStack,
-  djangoStack,  // ← add here
-]
-```
-
-Rebuild with `npm run build` and it auto-detects.
+- **`knowledge/nextjs/docs.md`**: official Next.js docs, auto-fetched. Refresh with `npm run fetch-docs`. Don't edit by hand.
+- **`knowledge/nextjs/community.md`**: security checklist, gotchas, and patterns the official docs don't cover well. **This is where contributors add the most value.** PRs welcome.
 
 ## Architecture
 
 ```
 src/
-├── server.ts              # MCP entry point, auto-detection, tool registration
+├── server.ts              # MCP entry point, detection, tool registration
 ├── core/
-│   ├── types.ts           # StackAdapter, ToolRegistration interfaces
+│   ├── types.ts           # ToolRegistration, StackAdapter interfaces
 │   ├── helpers.ts         # safePath, walkFiles, file utilities
-│   └── detect.ts          # Stack auto-detection registry
-├── scanners/              # Generic tools (any project)
+│   └── detect.ts          # Next.js detection
+├── scanners/              # Generic tools
 │   ├── files.ts           # File listing, reading, searching
 │   ├── imports.ts         # Import/dependency tracing
-│   ├── styles.ts          # Design system compliance checking
-│   └── flows.ts           # Cross-stack data flow tracing
-├── stacks/                # Stack-specific adapters
-│   ├── nextjs.ts          # Routes, config, middleware, server actions, env audit
-│   ├── supabase.ts        # SQL migrations, RLS, security
-│   ├── expo.ts            # Routes, components, React Native
-│   └── react-query.ts     # Hook parsing, cache invalidation
-├── knowledge/             # Per-stack documentation (served as MCP resources)
-│   ├── nextjs/
-│   │   ├── docs.md        # Auto-fetched from nextjs.org
-│   │   └── community.md   # Human-maintained best practices
-│   └── .../
-└── scripts/
-    └── fetch-docs.ts      # Build-time doc fetcher
+│   └── styles.ts          # Design system compliance checking
+└── stacks/
+    └── nextjs.ts          # Next.js analysis tools
+knowledge/nextjs/          # Docs + community knowledge (MCP resources)
+scripts/fetch-docs.ts      # Doc fetcher
 ```
-
-## Stack Detection
-
-Codebase Lens auto-detects your stack by checking for marker files and package.json dependencies:
-
-| Stack | How it's detected |
-|-------|-------------------|
-| Next.js | `next.config.*` exists, or `next` in dependencies |
-| Supabase | `supabase/` directory exists |
-| Expo / React Native | `expo`, `expo-router`, or `react-native` in dependencies |
-| React Query | `@tanstack/react-query` or `react-query` in dependencies |
-
-Multiple stacks can be detected simultaneously (e.g., Expo + Supabase + React Query).
 
 ## License
 

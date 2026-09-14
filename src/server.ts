@@ -8,10 +8,10 @@ import { join, resolve } from 'node:path'
 
 import type { ToolRegistration, PropertySchema, ToolCollector } from './core/types.js'
 import { detectStacks, describeDetection } from './core/detect.js'
+import { findNextApps, isNextApp } from './core/workspace.js'
 import { registerFileTools } from './scanners/files.js'
 import { registerImportTools } from './scanners/imports.js'
 import { registerStyleTools } from './scanners/styles.js'
-import { registerFlowTools } from './scanners/flows.js'
 
 // ---------------------------------------------------------------------------
 // JSON Schema → Zod converter
@@ -100,16 +100,37 @@ registerFileTools(collector, root)
 registerImportTools(collector, root)
 registerStyleTools(collector, root)
 
-// 2. Auto-detect stacks and register stack-specific tools
-const detected = detectStacks(root)
-for (const stack of detected) {
-  stack.adapter.register(collector, root)
+// 2. Auto-detect Next.js — at PROJECT_PATH itself, or inside a monorepo's workspaces
+let appRoot = root
+let detected = detectStacks(root)
+let workspaceNote = ''
+
+if (detected.length === 0) {
+  const apps = findNextApps(root)
+  const override = process.env.CODEBASE_LENS_APP
+  let chosen = apps[0]
+  if (override) {
+    const overridePath = resolve(root, override)
+    chosen = apps.find(a => a.path === overridePath)
+      ?? (isNextApp(overridePath) ? { path: overridePath, relPath: override, routeFiles: 0 } : undefined)
+    if (!chosen) workspaceNote = `CODEBASE_LENS_APP="${override}" is not a Next.js app. `
+  }
+  if (chosen) {
+    appRoot = chosen.path
+    detected = detectStacks(appRoot)
+    const others = apps.filter(a => a !== chosen).map(a => `${a.relPath} (${a.routeFiles} route files)`)
+    workspaceNote +=
+      `Monorepo: analyzing Next.js app at ${chosen.relPath}${override ? ' (CODEBASE_LENS_APP)' : ` — the app with the most routes (${chosen.routeFiles} route files)`}. ` +
+      (others.length ? `Other Next.js apps: ${others.join(', ')}. Set CODEBASE_LENS_APP to one of these to analyze it instead. ` : '') +
+      'Next.js tool file paths are relative to that app directory.'
+  }
 }
 
-// 3. Register flow tracer (works best with both frontend + backend stacks)
-registerFlowTools(collector, root)
+for (const stack of detected) {
+  stack.adapter.register(collector, appRoot)
+}
 
-const detectionSummary = describeDetection(detected)
+const detectionSummary = [describeDetection(detected), workspaceNote].filter(Boolean).join('\n\n')
 
 // ---------------------------------------------------------------------------
 // Create MCP server
