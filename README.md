@@ -4,6 +4,19 @@ An MCP server that gives Claude Code (or any MCP client) deep insight into Next.
 
 Claude can read a `page.tsx` file on its own. What it can't easily do is hold the whole app in its head: which layout wraps which page, where `'use client'` pulls a subtree into the browser bundle, which route handlers skip auth, or which exports nothing imports. codebase-lens parses your project with the TypeScript compiler API and answers those questions directly.
 
+## Why
+
+We tested the same security audit question on a 90-file Next.js app across different models and configurations:
+
+| Config | Correct findings | Hallucinations | Cost |
+|--------|-----------------|----------------|------|
+| Haiku alone | ~5 of 27 | 7 false positives | $0.19 |
+| **Haiku + codebase-lens** | **~23 of 27** | **0** | **$0.10** |
+| Opus alone | ~20 of 27 | 2 false positives | $0.47 |
+| **Opus + codebase-lens** | **~24 of 27** | **0** | **$0.65** |
+
+Haiku with codebase-lens outperformed Opus without it — at one-fifth the cost, in a quarter of the time, with zero hallucinations. Without tools, Haiku invented security issues that don't exist (fake CSRF problems, nonexistent password handling). With tools, it reported only what the code actually shows.
+
 ## How it works
 
 ```
