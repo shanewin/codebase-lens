@@ -1,0 +1,37 @@
+{
+  "name": "codebase-lens",
+  "version": "0.1.0",
+  "description": "MCP server that gives Claude Code deep codebase intelligence — auto-detects your stack and provides analysis tools for migrations, security, routing, data flows, and more.",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "codebase-lens": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsc --watch",
+    "fetch-docs": "npx tsx scripts/fetch-docs.ts",
+    "fetch-docs:nextjs": "npx tsx scripts/fetch-docs.ts nextjs",
+    "prebuild": "echo 'Run npm run fetch-docs to update knowledge files (optional)'"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "codebase",
+    "analysis",
+    "supabase",
+    "expo",
+    "react-native",
+    "react-query"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
