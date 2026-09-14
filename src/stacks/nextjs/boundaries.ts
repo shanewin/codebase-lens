@@ -169,6 +169,8 @@ function serverEntries(tree: SegmentNode): string[] {
 
 export interface BoundaryAnalysis {
   envs: Map<string, Set<Env>>
+  /** Client-environment import edges, reversed: file → files that import it in the client bundle */
+  clientImporters: Map<string, Set<string>>
   /** For each (file, env), the file that first pulled it in — for chain reconstruction */
   parents: Map<string, string | null>
   boundaries: { from: string; to: string; line: number }[]
@@ -187,6 +189,7 @@ export function analyzeBoundaries(root: string, appDir: string): BoundaryAnalysi
   const envs = new Map<string, Set<Env>>()
   const parents = new Map<string, string | null>()
   const boundaries: BoundaryAnalysis['boundaries'] = []
+  const clientImporters = new Map<string, Set<string>>()
   const entries = serverEntries(buildAppTree(appDir))
 
   // BFS over (file, env) states
@@ -210,6 +213,11 @@ export function analyzeBoundaries(root: string, appDir: string): BoundaryAnalysi
 
     for (const imp of f.imports) {
       if (imp.typeOnly || !imp.resolved) continue
+      if (env === 'client') {
+        const importers = clientImporters.get(imp.resolved) ?? new Set<string>()
+        importers.add(file)
+        clientImporters.set(imp.resolved, importers)
+      }
       const target = getFacts(imp.resolved)
       if (env === 'server' && target?.directive === 'use client') {
         boundaries.push({ from: relative(root, file), to: relative(root, imp.resolved), line: imp.line })
@@ -217,7 +225,30 @@ export function analyzeBoundaries(root: string, appDir: string): BoundaryAnalysi
       queue.push([imp.resolved, env, file])
     }
   }
-  return { envs, parents, boundaries, facts, entries }
+  return { envs, clientImporters, parents, boundaries, facts, entries }
+}
+
+/**
+ * Every distinct import chain from a 'use client' module down to `target`, following client-bundle import edges
+ * backwards and stopping at the first 'use client' file on each path (that's where the fix goes).
+ */
+function clientChainsTo(root: string, a: BoundaryAnalysis, target: string, limit = 25): { chains: string[][]; truncated: boolean } {
+  const chains: string[][] = []
+  let truncated = false
+  const walk = (file: string, below: string[]): void => {
+    if (chains.length >= limit) { truncated = true; return }
+    const path = [file, ...below]
+    const importers = a.clientImporters.get(file)
+    if (a.facts.get(file)?.directive === 'use client' || !importers?.size) {
+      chains.push(path.map(f => relative(root, f)))
+      return
+    }
+    for (const importer of importers) {
+      if (!path.includes(importer)) walk(importer, path)
+    }
+  }
+  walk(target, [])
+  return { chains, truncated }
 }
 
 function chainTo(root: string, a: BoundaryAnalysis, file: string, env: Env): string[] {
@@ -286,7 +317,14 @@ export function registerBoundaryTools(tools: ToolCollector, root: string, appDir
             if (imp.typeOnly) continue
             const pkg = !imp.resolved ? isBareOrBuiltin(imp.specifier) : null
             if (pkg) {
-              findings.push({ severity: 'high', detail: `Server-only module "${imp.specifier}" imported into the client bundle`, file: `${rel(file)}:${imp.line}`, chain: chainTo(root, a, file, 'client') })
+              // One finding per client chain: each 'use client' entry point needs its own fix
+              const { chains, truncated } = clientChainsTo(root, a, file)
+              for (const chain of chains) {
+                findings.push({ severity: 'high', detail: `Server-only module "${imp.specifier}" reaches the client bundle: ${chain.join(' → ')}`, file: `${rel(file)}:${imp.line}`, chain })
+              }
+              if (truncated) {
+                findings.push({ severity: 'info', detail: `More client import chains reach ${rel(file)} than the ${chains.length} listed`, file: rel(file) })
+              }
             }
           }
           // Files shared with the server are skipped: reading server env there is valid, and Next.js never inlines it
@@ -312,7 +350,7 @@ export function registerBoundaryTools(tools: ToolCollector, root: string, appDir
         }
       }
 
-      const order = { high: 0, medium: 1, low: 2, info: 3 }
+      const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
       findings.sort((x, y) => order[x.severity] - order[y.severity])
 
       return {

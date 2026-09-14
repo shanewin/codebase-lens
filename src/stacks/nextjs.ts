@@ -311,9 +311,20 @@ export const nextjsStack: StackAdapter = {
               file: f.file,
             })
           }
-          // .gitignore is checked relative to the app, so only for env files in the app directory itself
-          if (!f.template && !f.file.includes('/') && f.file.endsWith('.local') && !ignored(f.file)) {
-            findings.push({ severity: 'high', detail: `${f.file} is not covered by .gitignore`, file: f.file })
+          // .gitignore is checked relative to the app, so only for env files in the app directory itself.
+          // .local files hold secrets by convention; Next.js allows committing .env/.env.development/.env.production
+          // with non-secret defaults, so those are high only when they contain secret-looking vars.
+          if (!f.template && !f.file.includes('/') && !ignored(f.file)) {
+            const secrets = f.vars.filter(v => SECRET_ENV_NAME.test(v))
+            if (f.file.endsWith('.local') || secrets.length) {
+              findings.push({
+                severity: 'high',
+                detail: `${f.file} is not covered by .gitignore${secrets.length ? ` and contains secret-looking vars: ${secrets.join(', ')}` : ''}`,
+                file: f.file,
+              })
+            } else {
+              findings.push({ severity: 'low', detail: `${f.file} is not covered by .gitignore — fine for non-secret defaults, but keep secrets in .env*.local`, file: f.file })
+            }
           }
         }
 

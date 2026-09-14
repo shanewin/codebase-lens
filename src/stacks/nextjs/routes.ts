@@ -170,7 +170,7 @@ export function resolveAppRoutes(root: string, tree: SegmentNode): ResolvedRoute
 // Structural findings
 // ---------------------------------------------------------------------------
 
-export interface Finding { severity: 'high' | 'medium' | 'low' | 'info'; detail: string; file?: string }
+export interface Finding { severity: 'critical' | 'high' | 'medium' | 'low' | 'info'; detail: string; file?: string }
 
 export function auditAppTree(root: string, tree: SegmentNode, routes: ResolvedRoute[]): Finding[] {
   const findings: Finding[] = []

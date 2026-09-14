@@ -194,6 +194,26 @@ function matchParen(s: string, open: number): number {
 // Tools
 // ---------------------------------------------------------------------------
 
+const DESTRUCTIVE_NAME = /delete|remove|destroy|drop|purge|wipe|erase|truncate/i
+// Call names that destroy records. Generic `.remove()` is excluded: it's common for lists, sets, and DOM nodes.
+const DESTRUCTIVE_CALL = /^(delete|deleteMany|deleteOne|destroy|destroyAll|drop|dropTable|truncate|purge)$/i
+const DESTRUCTIVE_SQL = /\b(DELETE\s+FROM|DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE)\b/i
+
+/** Evidence that a function destroys data: a delete-style call, destructive SQL, or a destructive function name. */
+function destructiveEvidence(sf: ts.SourceFile, node: ts.Node, name: string): string | null {
+  let evidence: string | null = null
+  const visit = (n: ts.Node): void => {
+    if (evidence) return
+    if (ts.isCallExpression(n) && DESTRUCTIVE_CALL.test(calleeName(n.expression) ?? '')) evidence = `${n.expression.getText(sf)}()`
+    else if (ts.isStringLiteralLike(n) && DESTRUCTIVE_SQL.test(n.text)) evidence = `SQL "${n.text.slice(0, 60)}"`
+    ts.forEachChild(n, visit)
+  }
+  visit(node)
+  return evidence ?? (DESTRUCTIVE_NAME.test(name) ? `name "${name}"` : null)
+}
+
+const SEVERITY_ORDER: Record<Finding['severity'], number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
+
 function authCallSet(extra?: string): Set<string> {
   return new Set([...DEFAULT_AUTH_CALLS, ...(extra ?? '').split(',').map(s => s.trim()).filter(Boolean)])
 }
@@ -304,7 +324,10 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
       const resolver = createResolver(root)
       const files = projectSourceFiles(root)
 
-      const actions: { name: string; file: string; line: number; type: 'module' | 'inline'; auth: AuthSignal[]; validates_input: boolean; used_by: string[] }[] = []
+      const actions: {
+        name: string; file: string; line: number; type: 'module' | 'inline'
+        auth: AuthSignal[]; destructive: string | null; validates_input: boolean; used_by: string[]
+      }[] = []
       const validation = (sf: ts.SourceFile, node: ts.Node) => {
         let found = false
         const visit = (n: ts.Node): void => {
@@ -323,14 +346,22 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
         if (fileDirective(sf) === 'use server') {
           for (const exp of getExports(sf)) {
             if (exp.typeOnly || !exp.fn) continue
-            actions.push({ name: exp.name, file: rel, line: exp.line, type: 'module', auth: findAuthSignals(sf, exp.fn, authCalls), validates_input: validation(sf, exp.fn), used_by: [] })
+            actions.push({
+              name: exp.name, file: rel, line: exp.line, type: 'module',
+              auth: findAuthSignals(sf, exp.fn, authCalls), destructive: destructiveEvidence(sf, exp.fn, exp.name),
+              validates_input: validation(sf, exp.fn), used_by: [],
+            })
           }
         }
         const visit = (n: ts.Node): void => {
           if ((ts.isFunctionDeclaration(n) || ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isMethodDeclaration(n)) && bodyDirectives(n).includes('use server')) {
             const name = ts.isFunctionDeclaration(n) && n.name ? n.name.text
               : ts.isVariableDeclaration(n.parent) && ts.isIdentifier(n.parent.name) ? n.parent.name.text : '(anonymous)'
-            actions.push({ name, file: rel, line: lineOf(sf, n), type: 'inline', auth: findAuthSignals(sf, n, authCalls), validates_input: validation(sf, n), used_by: [] })
+            actions.push({
+              name, file: rel, line: lineOf(sf, n), type: 'inline',
+              auth: findAuthSignals(sf, n, authCalls), destructive: destructiveEvidence(sf, n, name),
+              validates_input: validation(sf, n), used_by: [],
+            })
           }
           ts.forEachChild(n, visit)
         }
@@ -355,14 +386,21 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
         }
       }
 
-      const findings: Finding[] = actions.filter(a => a.auth.length === 0).map(a => ({
-        severity: 'medium' as const,
-        detail: `Server action ${a.name} has no auth check — it is callable by anyone via POST with its action ID`,
-        file: `${a.file}:${a.line}`,
-      }))
+      const findings: Finding[] = actions.filter(a => a.auth.length === 0).map(a => a.destructive
+        ? {
+          severity: 'critical' as const,
+          detail: `Server action ${a.name} destroys data (${a.destructive}) with no auth check — anyone can call it via POST with its action ID`,
+          file: `${a.file}:${a.line}`,
+        }
+        : {
+          severity: 'medium' as const,
+          detail: `Server action ${a.name} has no auth check — it is callable by anyone via POST with its action ID`,
+          file: `${a.file}:${a.line}`,
+        })
       for (const a of actions.filter(a => !a.validates_input)) {
         findings.push({ severity: 'low', detail: `Server action ${a.name} does not validate its input with a schema parse`, file: `${a.file}:${a.line}` })
       }
+      findings.sort((x, y) => SEVERITY_ORDER[x.severity] - SEVERITY_ORDER[y.severity])
       return { count: actions.length, actions, findings }
     },
   })
