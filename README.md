@@ -33,7 +33,7 @@ codebase-lens (MCP server over stdio)
 ### 1. Clone and build
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/codebase-lens.git
+git clone https://github.com/shanewin/codebase-lens.git
 cd codebase-lens
 npm install
 npm run fetch-docs   # pull the latest Next.js docs (optional, recommended)

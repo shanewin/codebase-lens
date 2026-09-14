@@ -29,4 +29,4 @@ If you're a CTO or tech lead, this is about something bigger. Imagine encoding y
 
 The repo is open source. It's built for Next.js right now, but the same approach — framework-specific AST analysis exposed as MCP tools — works for any framework where structure matters more than syntax. Rails, Django, Laravel, Flutter. The pattern is the same: give the AI the blueprints instead of making it explore the building.
 
-github.com/YOUR_USERNAME/codebase-lens
+github.com/shanewin/codebase-lens
