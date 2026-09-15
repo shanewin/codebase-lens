@@ -17,31 +17,43 @@ const RULE_SEVERITIES = ['error', 'warn'] as const
 export type RuleSeverity = (typeof RULE_SEVERITIES)[number]
 
 /** Rule types from the design that this version doesn't check yet. Rejected rather than ignored, so nobody believes they're enforced. */
-const PLANNED_RULES = ['route-auth', 'server-action-auth', 'client-bundle']
-const SUPPORTED_RULES = ['forbidden-imports']
+const PLANNED_RULES = ['route-auth', 'server-action-auth']
+const SUPPORTED_RULES = ['forbidden-imports', 'client-bundle']
 
 /**
- * Restricts who may import something. Paths and globs are relative to the Next.js app root, like tool output.
- *  - target: `modules` (package specifiers, subpaths included) or `imports` (file globs, matched after resolving aliases)
- *  - scope: importers matching `from` are violations, or importers outside `allowedIn` are (an empty `allowedIn` means nowhere)
+ * What a rule restricts, and which importers it never applies to. Paths and globs are relative to the Next.js app root.
+ *  - `modules`: package specifiers. "pkg" is exactly that module; "pkg/*" is any of its subpaths (list both for either).
+ *  - `imports`: file globs, matched after resolving aliases. Files inside the restricted area may import each other.
  */
-export interface ForbiddenImportRule {
+interface ImportRuleBase {
   name: string
   modules?: string[]
   imports?: string[]
-  from?: string[]
-  allowedIn?: string[]
-  /** Type-only imports are erased at build time, so they're allowed unless this is set */
-  includeTypeOnly: boolean
+  /** Importer globs the rule never applies to, e.g. data-loading files that live next to UI code */
+  except: string[]
   severity: RuleSeverity
   /** Shown with each violation, e.g. how to do it the approved way */
   message?: string
 }
 
+/** Who may import something: importers matching `from` are violations, or importers outside `allowedIn` are (empty = nowhere). */
+export interface ForbiddenImportRule extends ImportRuleBase {
+  from?: string[]
+  allowedIn?: string[]
+  /** Type-only imports are erased at build time, so they're allowed unless this is set */
+  includeTypeOnly: boolean
+  /** Test, story, and mock files are skipped unless this is set */
+  includeTests: boolean
+}
+
+/** Something that must never reach the client bundle, through any chain of imports from a 'use client' module. */
+export type ClientBundleRule = ImportRuleBase
+
 export interface Policy {
   version: 1
   mode: PolicyMode
   forbiddenImports: ForbiddenImportRule[]
+  clientBundle: ClientBundleRule[]
 }
 
 export interface LoadedPolicy {
@@ -52,6 +64,7 @@ export interface LoadedPolicy {
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+const nonEmptyString = (v: unknown): v is string => typeof v === 'string' && !!v.trim()
 
 /** Load the first policy file found in `dirs` (PROJECT_PATH, then the analyzed app directory). */
 export function loadPolicy(dirs: string[]): LoadedPolicy {
@@ -71,7 +84,7 @@ export function loadPolicy(dirs: string[]): LoadedPolicy {
 
 /** Validate a parsed policy document, pushing every problem found into `errors`. */
 export function parsePolicy(raw: unknown, errors: string[]): Policy {
-  const policy: Policy = { version: 1, mode: 'warn', forbiddenImports: [] }
+  const policy: Policy = { version: 1, mode: 'warn', forbiddenImports: [], clientBundle: [] }
   if (!isObject(raw)) {
     errors.push('must be a JSON object')
     return policy
@@ -92,72 +105,79 @@ export function parsePolicy(raw: unknown, errors: string[]): Policy {
     return policy
   }
   for (const [ruleType, config] of Object.entries(raw.rules)) {
-    if (ruleType === 'forbidden-imports') policy.forbiddenImports = parseForbiddenImports(config, errors)
+    if (ruleType === 'forbidden-imports') policy.forbiddenImports = parseEntries(ruleType, config, errors, FORBIDDEN_KEYS, finishForbidden)
+    else if (ruleType === 'client-bundle') policy.clientBundle = parseEntries(ruleType, config, errors, [], base => base)
     else if (PLANNED_RULES.includes(ruleType)) errors.push(`rule "${ruleType}" is not supported yet (supported: ${SUPPORTED_RULES.join(', ')})`)
     else errors.push(`unknown rule "${ruleType}" (supported: ${SUPPORTED_RULES.join(', ')})`)
   }
   return policy
 }
 
-const ENTRY_KEYS = ['name', 'module', 'import', 'from', 'allowedIn', 'includeTypeOnly', 'severity', 'message']
+type Fail = (message: string) => void
 
-function parseForbiddenImports(config: unknown, errors: string[]): ForbiddenImportRule[] {
+const COMMON_KEYS = ['name', 'module', 'import', 'except', 'severity', 'message']
+const FORBIDDEN_KEYS = ['from', 'allowedIn', 'includeTypeOnly', 'includeTests']
+
+/** Parse a rule type's entry list: the shared target/except/severity/message fields, then the type's own fields. */
+function parseEntries<T extends ImportRuleBase>(
+  ruleType: string,
+  config: unknown,
+  errors: string[],
+  extraKeys: string[],
+  finish: (base: ImportRuleBase, entry: Record<string, unknown>, fail: Fail) => T,
+): T[] {
   if (!Array.isArray(config)) {
-    errors.push('"forbidden-imports" must be an array of rules')
+    errors.push(`"${ruleType}" must be an array of rules`)
     return []
   }
-  return config.flatMap((entry, i): ForbiddenImportRule[] => {
-    const at = `forbidden-imports[${i}]`
+  const keys = [...COMMON_KEYS, ...extraKeys]
+  return config.flatMap((entry, i): T[] => {
+    const at = `${ruleType}[${i}]`
     if (!isObject(entry)) {
       errors.push(`${at} must be an object`)
       return []
     }
     const problems: string[] = []
-    const fail = (message: string) => problems.push(`${at}: ${message}`)
-    for (const key of Object.keys(entry)) if (!ENTRY_KEYS.includes(key)) fail(`unknown key "${key}" (expected ${ENTRY_KEYS.join(', ')})`)
+    const fail: Fail = message => problems.push(`${at}: ${message}`)
+    for (const key of Object.keys(entry)) if (!keys.includes(key)) fail(`unknown key "${key}" (expected ${keys.join(', ')})`)
 
-    const rule: ForbiddenImportRule = {
-      name: typeof entry.name === 'string' && entry.name.trim() ? entry.name : at,
-      includeTypeOnly: false,
-      severity: 'error',
-    }
-    if (entry.name !== undefined && (typeof entry.name !== 'string' || !entry.name.trim())) fail('"name" must be a non-empty string')
+    const base: ImportRuleBase = { name: nonEmptyString(entry.name) ? entry.name : at, except: [], severity: 'error' }
+    if (entry.name !== undefined && !nonEmptyString(entry.name)) fail('"name" must be a non-empty string')
 
-    // Target: exactly one of module / import
     if ((entry.module === undefined) === (entry.import === undefined)) fail('needs exactly one of "module" (a package) or "import" (a file glob)')
-    if (entry.module !== undefined) rule.modules = stringOrList(entry.module, 'module', moduleProblem, fail, false)
-    if (entry.import !== undefined) rule.imports = stringOrList(entry.import, 'import', globProblem, fail, false)
+    if (entry.module !== undefined) base.modules = stringOrList(entry.module, 'module', moduleProblem, fail, false)
+    if (entry.import !== undefined) base.imports = stringOrList(entry.import, 'import', globProblem, fail, false)
+    if (entry.except !== undefined) base.except = stringOrList(entry.except, 'except', globProblem, fail, true)
 
-    // Scope: exactly one of from / allowedIn
-    if ((entry.from === undefined) === (entry.allowedIn === undefined)) fail('needs exactly one of "from" (where it is forbidden) or "allowedIn" (the only places it is allowed)')
-    if (entry.from !== undefined) rule.from = stringOrList(entry.from, 'from', globProblem, fail, false)
-    if (entry.allowedIn !== undefined) rule.allowedIn = stringOrList(entry.allowedIn, 'allowedIn', globProblem, fail, true)
-
-    if (entry.includeTypeOnly !== undefined) {
-      if (typeof entry.includeTypeOnly === 'boolean') rule.includeTypeOnly = entry.includeTypeOnly
-      else fail('"includeTypeOnly" must be true or false')
-    }
     if (entry.severity !== undefined) {
-      if (RULE_SEVERITIES.includes(entry.severity as RuleSeverity)) rule.severity = entry.severity as RuleSeverity
+      if (RULE_SEVERITIES.includes(entry.severity as RuleSeverity)) base.severity = entry.severity as RuleSeverity
       else fail(`"severity" must be one of ${RULE_SEVERITIES.join(', ')}`)
     }
     if (entry.message !== undefined) {
-      if (typeof entry.message === 'string' && entry.message.trim()) rule.message = entry.message
+      if (nonEmptyString(entry.message)) base.message = entry.message
       else fail('"message" must be a non-empty string')
     }
 
+    const rule = finish(base, entry, fail)
     errors.push(...problems)
     return problems.length ? [] : [rule]
   })
 }
 
-function stringOrList(
-  value: unknown,
-  key: string,
-  problemWith: (s: string) => string | null,
-  fail: (message: string) => void,
-  allowEmpty: boolean,
-): string[] {
+function finishForbidden(base: ImportRuleBase, entry: Record<string, unknown>, fail: Fail): ForbiddenImportRule {
+  const rule: ForbiddenImportRule = { ...base, includeTypeOnly: false, includeTests: false }
+  if ((entry.from === undefined) === (entry.allowedIn === undefined)) fail('needs exactly one of "from" (where it is forbidden) or "allowedIn" (the only places it is allowed)')
+  if (entry.from !== undefined) rule.from = stringOrList(entry.from, 'from', globProblem, fail, false)
+  if (entry.allowedIn !== undefined) rule.allowedIn = stringOrList(entry.allowedIn, 'allowedIn', globProblem, fail, true)
+  for (const flag of ['includeTypeOnly', 'includeTests'] as const) {
+    if (entry[flag] === undefined) continue
+    if (typeof entry[flag] === 'boolean') rule[flag] = entry[flag]
+    else fail(`"${flag}" must be true or false`)
+  }
+  return rule
+}
+
+function stringOrList(value: unknown, key: string, problemWith: (s: string) => string | null, fail: Fail, allowEmpty: boolean): string[] {
   const list = typeof value === 'string' ? [value] : value
   if (!Array.isArray(list) || list.some(v => typeof v !== 'string')) {
     fail(`"${key}" must be a string or an array of strings`)
@@ -179,8 +199,9 @@ function globProblem(glob: string): string | null {
 }
 
 function moduleProblem(name: string): string | null {
-  if (!name.trim()) return 'is empty'
-  if (name.startsWith('.') || name.startsWith('/')) return 'is a path; use "import" with a file glob for project files'
-  if (name.includes('*')) return 'must be a package name without wildcards (subpaths are included automatically)'
+  const pkg = name.endsWith('/*') ? name.slice(0, -2) : name
+  if (!pkg.trim()) return 'is empty'
+  if (pkg.startsWith('.') || pkg.startsWith('/')) return 'is a path; use "import" with a file glob for project files'
+  if (pkg.includes('*')) return 'may only use a wildcard as a trailing "/*" (meaning any subpath)'
   return null
 }

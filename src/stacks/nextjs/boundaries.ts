@@ -287,7 +287,7 @@ export function analyzeBoundaries(root: string, appDir: string): BoundaryAnalysi
  * Every distinct import chain from a 'use client' module down to `target`, following client-bundle import edges
  * backwards and stopping at the first 'use client' file on each path (that's where the fix goes).
  */
-function clientChainsTo(root: string, a: BoundaryAnalysis, target: string, limit = 25): { chains: string[][]; truncated: boolean } {
+export function clientChainsTo(root: string, a: BoundaryAnalysis, target: string, limit = 25): { chains: string[][]; truncated: boolean } {
   const chains: string[][] = []
   let truncated = false
   const walk = (file: string, below: string[]): void => {

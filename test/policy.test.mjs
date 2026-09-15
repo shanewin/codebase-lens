@@ -36,8 +36,8 @@ describe('loadPolicy', () => {
     assert.deepEqual(loaded.errors, [])
     assert.equal(loaded.policy.mode, 'enforce')
     assert.deepEqual(loaded.policy.forbiddenImports, [
-      { name: 'db stays on the server', modules: ['@prisma/client'], allowedIn: ['src/server/**'], includeTypeOnly: false, severity: 'error', message: 'Use a server action instead' },
-      { name: 'forbidden-imports[1]', imports: ['src/server/**'], from: ['src/components/**'], includeTypeOnly: true, severity: 'warn' },
+      { name: 'db stays on the server', modules: ['@prisma/client'], allowedIn: ['src/server/**'], except: [], includeTypeOnly: false, includeTests: false, severity: 'error', message: 'Use a server action instead' },
+      { name: 'forbidden-imports[1]', imports: ['src/server/**'], from: ['src/components/**'], except: [], includeTypeOnly: true, includeTests: false, severity: 'warn' },
     ])
   })
 
@@ -93,6 +93,21 @@ describe('parsePolicy validation', () => {
     assert.match(text, /\[1\]: needs exactly one of "from"/)
   })
 
+  it('parses client-bundle rules, which take a target and except but no scope', () => {
+    const { policy, errors } = parse({
+      version: 1,
+      rules: { 'client-bundle': [{ name: 'db', module: ['@calcom/prisma', 'pg'], except: '**/*.getServerSideProps.tsx', message: 'Server only' }, { import: 'server/**' }] },
+    })
+    assert.deepEqual(errors, [])
+    assert.deepEqual(policy.clientBundle, [
+      { name: 'db', modules: ['@calcom/prisma', 'pg'], except: ['**/*.getServerSideProps.tsx'], severity: 'error', message: 'Server only' },
+      { name: 'client-bundle[1]', imports: ['server/**'], except: [], severity: 'error' },
+    ])
+    const bad = parse({ version: 1, rules: { 'client-bundle': [{ module: 'pg', from: 'components/**' }, { except: [] }] } }).text
+    assert.match(bad, /client-bundle\[0\]: unknown key "from"/)
+    assert.match(bad, /client-bundle\[1\]: needs exactly one of "module"/)
+  })
+
   it('allows an empty allowedIn (allowed nowhere) but not an empty from', () => {
     assert.deepEqual(parse({ version: 1, rules: { 'forbidden-imports': [{ module: 'server-only-thing', allowedIn: [] }] } }).errors, [])
     assert.match(parse({ version: 1, rules: { 'forbidden-imports': [{ module: 'a', from: [] }] } }).text, /"from" must not be empty/)
@@ -104,14 +119,14 @@ describe('parsePolicy validation', () => {
       rules: {
         'forbidden-imports': [
           { module: './lib/db', from: '/abs/path' },
-          { module: '@company/*', allowedIn: ['src/../outside'] },
+          { module: '@company/*/utils', allowedIn: ['src/../outside'] },
           { import: 42, from: 'src/**', severity: 'fatal', includeTypeOnly: 'yes' },
         ],
       },
     })
     assert.match(text, /\[0\]: "module" entry "\.\/lib\/db" is a path; use "import"/)
     assert.match(text, /\[0\]: "from" entry "\/abs\/path" must be relative to the app root/)
-    assert.match(text, /\[1\]: "module" entry "@company\/\*" must be a package name without wildcards/)
+    assert.match(text, /\[1\]: "module" entry "@company\/\*\/utils" may only use a wildcard as a trailing "\/\*"/)
     assert.match(text, /\[1\]: "allowedIn" entry "src\/\.\.\/outside" must not contain "\.\."/)
     assert.match(text, /\[2\]: "import" must be a string or an array of strings/)
     assert.match(text, /\[2\]: "severity" must be one of error, warn/)

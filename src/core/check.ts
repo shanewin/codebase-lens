@@ -1,4 +1,6 @@
 import { join, relative } from 'node:path'
+import { findDir } from '../stacks/nextjs/ast.js'
+import { checkClientBundle } from '../stacks/nextjs/clientBundle.js'
 import { checkForbiddenImports, type PolicyViolation } from '../stacks/nextjs/forbidden.js'
 import { loadPolicy, POLICY_FILE, type PolicyMode } from './policy.js'
 import { resolveNextApp } from './workspace.js'
@@ -8,7 +10,7 @@ import { resolveNextApp } from './workspace.js'
 // ---------------------------------------------------------------------------
 
 export interface CheckViolation extends PolicyViolation {
-  /** Importer path relative to the project (repo) root, so CI logs and editors can open it; `file` stays app-relative */
+  /** Path relative to the project (repo) root, so CI logs and editors can open it; `file` stays app-relative */
   path: string
 }
 
@@ -31,6 +33,8 @@ export interface CheckResult {
   skipped: boolean
   rule_count: number
   scanned_files: number
+  /** Files in the client bundle (only computed when there are client-bundle rules) */
+  client_bundle_files: number
   errors: number
   warnings: number
   /** Enforce mode with at least one error-severity violation */
@@ -57,30 +61,39 @@ export function runPolicyCheck(projectPath: string, appOverride?: string): Check
   }
 
   const { policy } = loaded
+  const appDir = findDir(appRoot, ['src/app', 'app'])
+  if (policy.clientBundle.length && !appDir) {
+    return { ok: false, error: `${policyPath} has client-bundle rules, but ${appRoot} has no app/ or src/app/ directory`, problems: [], policy: policyPath }
+  }
+
   const base = {
     ok: true as const,
     project: projectPath,
     app: relative(projectPath, appRoot) || '.',
     policy: policyPath!,
     mode: policy.mode,
-    rule_count: policy.forbiddenImports.length,
+    rule_count: policy.forbiddenImports.length + policy.clientBundle.length,
   }
   if (policy.mode === 'off') {
-    return { ...base, skipped: true, scanned_files: 0, errors: 0, warnings: 0, failed: false, violations: [], caveats: [] }
+    return { ...base, skipped: true, scanned_files: 0, client_bundle_files: 0, errors: 0, warnings: 0, failed: false, violations: [], caveats: [] }
   }
 
-  const result = checkForbiddenImports(appRoot, policy.forbiddenImports)
-  const violations = result.violations.map(v => ({ ...v, path: relative(projectPath, join(appRoot, v.file)) }))
+  const forbidden = checkForbiddenImports(appRoot, policy.forbiddenImports)
+  const bundle = appDir ? checkClientBundle(appRoot, appDir, policy.clientBundle) : { client_files: 0, violations: [], caveats: [] }
+  const violations = [...forbidden.violations, ...bundle.violations]
+    .map(v => ({ ...v, path: relative(projectPath, join(appRoot, v.file)) }))
+    .sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line || a.rule.localeCompare(b.rule))
   const errors = violations.filter(v => v.severity === 'error').length
   return {
     ...base,
     skipped: false,
-    scanned_files: result.scanned_files,
+    scanned_files: forbidden.scanned_files,
+    client_bundle_files: bundle.client_files,
     errors,
     warnings: violations.length - errors,
     failed: policy.mode === 'enforce' && errors > 0,
     violations,
-    caveats: result.caveats,
+    caveats: [...(policy.forbiddenImports.length ? forbidden.caveats : []), ...bundle.caveats],
   }
 }
 
@@ -91,6 +104,7 @@ export function exitCode(report: CheckReport): 0 | 1 | 2 {
 }
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+const CHAINS_SHOWN = 3
 
 /** Human-readable report for terminals and CI logs. */
 export function formatReport(report: CheckReport): string {
@@ -103,7 +117,8 @@ export function formatReport(report: CheckReport): string {
     lines.push('', 'The policy mode is "off", so nothing was checked.')
     return lines.join('\n')
   }
-  lines.push(`Checked ${plural(report.scanned_files, 'file')} against ${plural(report.rule_count, 'rule')}.`)
+  const bundle = report.client_bundle_files ? ` (${plural(report.client_bundle_files, 'file')} in the client bundle)` : ''
+  lines.push(`Checked ${plural(report.scanned_files, 'file')}${bundle} against ${plural(report.rule_count, 'rule')}.`)
 
   let current: string | null = null
   for (const v of report.violations) {
@@ -112,6 +127,8 @@ export function formatReport(report: CheckReport): string {
       lines.push('', v.path)
     }
     lines.push(`  ${v.line}:  ${v.severity.padEnd(5)}  ${v.rule}`, `      ${v.detail}`)
+    for (const chain of (v.chains ?? []).slice(0, CHAINS_SHOWN)) lines.push(`      chain: ${chain.join(' → ')}`)
+    if ((v.chains?.length ?? 0) > CHAINS_SHOWN) lines.push(`      … ${plural(v.chains!.length - CHAINS_SHOWN, 'more chain')}`)
     if (v.message) lines.push(`      fix: ${v.message}`)
   }
 

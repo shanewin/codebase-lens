@@ -18,6 +18,7 @@ const FILES = {
     "export const load = () => import('@prisma/client/edge')",
     'export function Card() { return null }',
   ].join('\n'),
+  'src/components/Card.test.tsx': "import { db } from '@/server/db'\n",
   'src/lib/types.ts': "import { Prisma } from '@prisma/client'\nexport type P = Prisma.UserCreateInput\n",
 }
 
@@ -29,16 +30,22 @@ const check = (...rules) => {
 }
 
 const where = result => result.violations.map(v => `${v.file}:${v.line}`)
+const PRISMA = ['@prisma/client', '@prisma/client/*']
 
 describe('forbidden-imports', () => {
-  it('flags a package outside allowedIn, including subpaths and dynamic imports, but not type-only imports', () => {
-    const result = check({ module: '@prisma/client', allowedIn: ['src/server/**'] })
+  it('matches a package name exactly, so subpaths need "pkg/*"', () => {
+    assert.deepEqual(where(check({ module: '@prisma/client', allowedIn: ['src/server/**'] })), ['src/lib/types.ts:1'])
+    assert.deepEqual(where(check({ module: '@prisma/client/*', allowedIn: ['src/server/**'] })), ['src/components/Card.tsx:5'])
+  })
+
+  it('flags a package outside allowedIn, including dynamic imports, but not type-only imports', () => {
+    const result = check({ module: PRISMA, allowedIn: ['src/server/**'] })
     assert.deepEqual(where(result), ['src/components/Card.tsx:5', 'src/lib/types.ts:1'])
     assert.match(result.violations[0].detail, /a dynamic import of "@prisma\/client\/edge", which is allowed only in src\/server\/\*\*/)
   })
 
   it('includes type-only imports when asked', () => {
-    assert.deepEqual(where(check({ module: '@prisma/client', allowedIn: ['src/server/**'], includeTypeOnly: true })), [
+    assert.deepEqual(where(check({ module: PRISMA, allowedIn: ['src/server/**'], includeTypeOnly: true })), [
       'src/components/Card.tsx:1', 'src/components/Card.tsx:5', 'src/lib/types.ts:1',
     ])
   })
@@ -59,6 +66,16 @@ describe('forbidden-imports', () => {
     })
   })
 
+  it('skips test files unless includeTests is set', () => {
+    const rule = { import: 'src/server/**', from: 'src/components/**' }
+    assert.ok(!where(check(rule)).includes('src/components/Card.test.tsx:1'))
+    assert.ok(where(check({ ...rule, includeTests: true })).includes('src/components/Card.test.tsx:1'))
+  })
+
+  it('never applies to importers matching except', () => {
+    assert.deepEqual(where(check({ import: 'src/server/**', from: 'src/components/**', except: ['src/components/Card.tsx'] })), [])
+  })
+
   it('lets a restricted area import its own files', () => {
     assert.deepEqual(where(check({ import: 'src/server/**', allowedIn: [] })), ['src/components/Card.tsx:2', 'src/components/Card.tsx:3'])
   })
@@ -68,8 +85,8 @@ describe('forbidden-imports', () => {
   })
 
   it('reports nothing when every import is allowed', () => {
-    const result = check({ module: '@prisma/client', allowedIn: ['src/**'] }, { import: 'src/lib/**', from: 'src/app/**' })
+    const result = check({ module: PRISMA, allowedIn: ['src/**'] }, { import: 'src/lib/**', from: 'src/app/**' })
     assert.deepEqual(result.violations, [])
-    assert.equal(result.scanned_files, 5)
+    assert.equal(result.scanned_files, 6)
   })
 })

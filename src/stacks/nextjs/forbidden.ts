@@ -7,18 +7,20 @@ import { projectGraph, type ResolvedImport } from './graph.js'
 export interface PolicyViolation {
   /** The rule's name from the policy (or its position, e.g. "forbidden-imports[0]") */
   rule: string
-  ruleType: 'forbidden-imports'
+  ruleType: 'forbidden-imports' | 'client-bundle'
   severity: RuleSeverity
-  /** App-relative importer path */
+  /** App-relative path of the file with the offending import */
   file: string
   line: number
   /** The import as written */
   specifier: string
-  /** What it reached: the package name, or the app-relative file it resolved to */
+  /** What it reached: the package specifier, or the app-relative file it resolved to */
   target: string
   detail: string
   /** The policy's fix guidance, when it gives one */
   message?: string
+  /** client-bundle only: import chains from a 'use client' module to the target */
+  chains?: string[][]
 }
 
 export interface ForbiddenImportsResult {
@@ -27,17 +29,24 @@ export interface ForbiddenImportsResult {
   caveats: string[]
 }
 
+/** Matched against the app-relative path with a leading slash */
+export const TEST_FILE = /(\.(test|spec|stories)\.[cm]?[jt]sx?$)|\/(__tests__|__mocks__|__fixtures__)\//
+
 const BUILTINS = new Set(builtinModules)
 /** "node:fs" and "fs" are the same module */
 const normalizeModule = (name: string) => (name.startsWith('node:') && BUILTINS.has(name.slice(5)) ? name.slice(5) : name)
 
-const matchesModule = (specifier: string, module: string) => {
+/** "pkg" matches exactly that module; "pkg/*" matches any of its subpaths. */
+export function matchesModule(specifier: string, pattern: string): boolean {
   const spec = normalizeModule(specifier)
-  const mod = normalizeModule(module)
-  return spec === mod || spec.startsWith(`${mod}/`)
+  if (pattern.endsWith('/*')) return spec.startsWith(`${normalizeModule(pattern.slice(0, -2))}/`)
+  return spec === normalizeModule(pattern)
 }
 
-const anyGlob = (path: string, globs: string[]) => globs.some(g => matchesPattern(path, g))
+export const anyGlob = (path: string, globs: readonly string[]) => globs.some(g => matchesPattern(path, g))
+
+export const sortViolations = (list: PolicyViolation[]) =>
+  list.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.rule.localeCompare(b.rule))
 
 /** What an import reached under this rule's target, or null when the rule doesn't apply to it. */
 function reachedTarget(rule: ForbiddenImportRule, imp: ResolvedImport, root: string, importer: string): string | null {
@@ -52,6 +61,8 @@ function reachedTarget(rule: ForbiddenImportRule, imp: ResolvedImport, root: str
 
 /** Whether an importer at this path breaks the rule's scope. */
 function outOfScope(rule: ForbiddenImportRule, importer: string): boolean {
+  if (anyGlob(importer, rule.except)) return false
+  if (!rule.includeTests && TEST_FILE.test(`/${importer}`)) return false
   if (rule.from) return anyGlob(importer, rule.from)
   return !anyGlob(importer, rule.allowedIn ?? [])
 }
@@ -99,12 +110,11 @@ export function checkForbiddenImports(root: string, rules: ForbiddenImportRule[]
     }
   }
 
-  violations.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.rule.localeCompare(b.rule))
   return {
     scanned_files: graph.files.length,
-    violations,
+    violations: sortViolations(violations),
     caveats: [
-      'Only app source files are checked (with src/, only src/ and root-level files); tests and scripts outside them are not.',
+      'Only app source files are checked (with src/, only src/ and root-level files); test, story, and mock files are skipped unless "includeTests" is set.',
       'CommonJS require(), imports with computed specifiers, and inline type references (import("x").Type) are not seen.',
       '"import" globs match files inside the app; workspace packages outside it are matched with "module" by package name.',
     ],

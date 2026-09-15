@@ -143,6 +143,57 @@ Patterns match file paths (relative to the app directory) or URL routes:
 
 Rules match a finding's `file` and `route` fields, never its message text. Results that rules changed include a `rules_applied` count. Problems in the file (invalid JSON, unknown keys, unsupported severities) are logged to stderr and shown in the `lens://status` resource.
 
+## Policy Checks
+
+Write down which code may import what, and check it in CI. Add `codebase-lens.policy.json` to the project root (or the app directory):
+
+```json
+{
+  "version": 1,
+  "mode": "warn",
+  "rules": {
+    "client-bundle": [
+      { "name": "database stays on the server", "module": ["@prisma/client", "@acme/db"], "message": "Load data in a server component and pass it down" },
+      { "import": "src/server/**" }
+    ],
+    "forbidden-imports": [
+      { "module": "stripe", "allowedIn": ["src/server/billing/**"] },
+      { "module": "next/router", "from": "src/app/**", "message": "Use next/navigation in the App Router" }
+    ]
+  }
+}
+```
+
+```bash
+npm run check -- /path/to/project           # readable report
+npm run --silent check -- /path/to/project --json   # machine-readable, includes exit_code
+```
+
+| Rule | Checks |
+|------|--------|
+| `client-bundle` | Nothing it names reaches the browser through any chain of imports from a `'use client'` module. Follows the same import walk as `map_client_boundaries`: type-only imports, `'use server'` action references, and unused barrel re-exports don't count. Each violation points at the import to fix and lists every chain to it. |
+| `forbidden-imports` | Only allowed files import something: importers matching `from` are violations, or importers outside `allowedIn` are (an empty `allowedIn` means nowhere). Covers imports, re-exports, and dynamic `import()`. |
+
+Each rule entry needs a target, either `module` (package names) or `import` (file globs, matched after resolving path aliases). The other fields are optional:
+
+- `module` names match exactly; `"pkg/*"` matches the package's subpaths, so list both to cover either.
+- `except` lists importer globs the rule never applies to, such as data-loading files next to UI code.
+- `severity` is `error` (default) or `warn`, and `message` is shown with each violation.
+- Files inside an `import` glob may import each other.
+- `forbidden-imports` only: `includeTypeOnly` also checks type-only imports, and `includeTests` also checks test, story, and mock files.
+
+Globs are relative to the app directory and use the same patterns as project rules.
+
+`mode` decides the exit code, and it can only be set in the policy file, so protect that file with `CODEOWNERS`:
+
+| Exit code | When |
+|-----------|------|
+| 0 | No error-severity violations, or `mode` is `warn` or `off` |
+| 1 | `mode` is `enforce` and there is at least one error-severity violation |
+| 2 | The check could not run: no policy file, an invalid policy (every problem is listed), or no Next.js app |
+
+The policy file fails closed: an unknown key, a misspelled rule name, or a bad value makes the whole policy invalid instead of quietly skipping that rule. Start in `warn` mode, fix or `except` what it reports, then switch to `enforce`.
+
 ## Knowledge Resources
 
 Markdown knowledge files are exposed as MCP resources that Claude can read:
@@ -159,6 +210,9 @@ src/
 │   ├── types.ts           # ToolRegistration, ToolCollector interfaces
 │   ├── helpers.ts         # safePath, walkFiles, file utilities
 │   ├── rules.ts           # .codebase-lens.json loading and matching
+│   ├── policy.ts          # codebase-lens.policy.json loading and validation
+│   ├── check.ts           # Runs policy rules and builds the check report
+│   ├── runner.ts          # Runs every Next.js tool with timings (snapshot script)
 │   └── workspace.ts       # Finds the Next.js app (PROJECT_PATH, CODEBASE_LENS_APP, or monorepo workspaces)
 ├── scanners/              # Generic tools
 │   ├── files.ts           # File listing, reading, searching
@@ -168,14 +222,18 @@ src/
     ├── nextjs.ts          # Registers the Next.js tools; config, middleware, and env audits
     └── nextjs/
         ├── ast.ts         # Parsing, exports/imports, module resolution (tsconfig paths and extends, workspaces)
+        ├── graph.ts       # Shared, cached import graph used by every tool
         ├── routes.ts      # Route tree and route list
         ├── boundaries.ts  # Server/client boundary map
         ├── auth.ts        # Route handler auth and server actions
         ├── unused.ts      # Unused exports
-        └── fetching.ts    # Data fetching and caching
+        ├── fetching.ts    # Data fetching and caching
+        ├── forbidden.ts   # forbidden-imports policy rule
+        ├── clientBundle.ts # client-bundle policy rule
+        └── snapshot.ts    # Snapshot normalization and diffing
 test/                      # node --test suites and fixture apps
 knowledge/nextjs/          # Docs + community knowledge (MCP resources)
-scripts/fetch-docs.ts      # Doc fetcher
+scripts/                   # check.mjs (policy check), snapshot.mjs (real-app regression check), fetch-docs.ts
 ```
 
 ## Development

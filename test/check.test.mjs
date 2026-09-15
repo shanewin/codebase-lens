@@ -79,6 +79,21 @@ describe('check command', () => {
     assert.match(stderr, /Unknown option: --enforce/)
   })
 
+  it('runs client-bundle rules and prints the import chains', () => {
+    const files = {
+      'package.json': APP_FILES['package.json'],
+      'src/app/page.tsx': "import { Box } from '../components/Box'\nexport default function Page() { return <Box /> }\n",
+      'src/components/Box.tsx': "'use client'\nimport { db } from '../server/db'\nexport function Box() { return String(db) }\n",
+      'src/server/db.ts': 'export const db = 1\n',
+      'codebase-lens.policy.json': { version: 1, mode: 'enforce', rules: { 'client-bundle': [{ name: 'server stays server', import: 'src/server/**' }] } },
+    }
+    const { code, stdout } = run(tempProject(files))
+    assert.equal(code, 1)
+    assert.match(stdout, /Checked \d+ files \(2 files in the client bundle\) against 1 rule\./)
+    assert.match(stdout, /\nsrc\/components\/Box\.tsx\n  2:  error  server stays server\n/)
+    assert.match(stdout, /chain: src\/components\/Box\.tsx → src\/server\/db\.ts/)
+  })
+
   it('in a monorepo, reads the policy at the repo root, matches app-relative globs, and prints repo-relative paths', () => {
     const files = { 'package.json': { name: 'mono', private: true, workspaces: ['apps/*'], devDependencies: {} }, 'codebase-lens.policy.json': policy('enforce') }
     for (const [path, content] of Object.entries(APP_FILES)) files[`apps/web/${path}`] = content
