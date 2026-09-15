@@ -30,7 +30,7 @@ describe('summaries', () => {
   it('list routes as one-line strings', async () => {
     const { summary } = await summarize(APP, 'list_routes')
     assert.ok(summary.routes.includes('route /api/users [GET, POST] → src/app/api/users/route.ts'))
-    assert.equal(summary.by_type.route, 9) // route files, not endpoints (methods)
+    assert.equal(summary.by_type.route, 15) // route files, not endpoints (methods)
   })
 
   it('drop per-route detail from the route tree but keep the tree', async () => {

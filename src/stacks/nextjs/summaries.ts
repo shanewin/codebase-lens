@@ -71,7 +71,7 @@ export const SUMMARIES: Record<string, Summarizer> = {
       middleware: r.middleware
         ? { file: r.middleware.file, kind: r.middleware.kind, matchers: r.middleware.matchers, has_auth_logic: r.middleware.hasAuthLogic }
         : null,
-      ...capList('unprotected', byStatus('unprotected').map(endpoint)),
+      ...capList('unprotected', byStatus('unprotected').map((e: any) => endpoint(e) + (e.likely_public ? ` (likely public: ${e.likely_public})` : ''))),
       ...capList('middleware_only', byStatus('middleware-only').map(endpoint)),
       ...capList('delegated', byStatus('delegated').map(endpoint)),
       ...capFindings(r.findings),

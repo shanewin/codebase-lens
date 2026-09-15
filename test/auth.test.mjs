@@ -20,7 +20,30 @@ describe('audit_route_auth', () => {
       'PATCH /api/wrapped': 'protected', // same-file helper → auth()
       'DELETE /api/wrapped': 'unprotected',
       'GET /api/token': 'unprotected', // .toString() is not a delegating handler factory
+      'POST /api/reports': 'protected', // imported requirePermission() → auth()
+      'GET /api/preview': 'unprotected', // imported helper without auth
+      'GET /api/health': 'unprotected',
+      'POST /api/auth/forgot-password': 'unprotected',
+      'POST /api/jobs': 'unprotected', // container.get(serviceModule.token) is not a credential read
+      'POST /api/guest': 'unprotected', // a CSRF cookie check is not authentication
     })
+  })
+
+  it('follows auth helpers imported from other modules', async () => {
+    const { endpoints } = await runTool(APP, 'audit_route_auth')
+    const reports = endpoints.find(e => e.path === '/api/reports')
+    assert.ok(reports.signals.some(s => s.evidence === 'requirePermission() → auth() (in src/lib/permissions.ts)'))
+  })
+
+  it('reports routes that are usually public by design as info, with the reason', async () => {
+    const { findings, summary } = await runTool(APP, 'audit_route_auth')
+    const byEndpoint = Object.fromEntries(findings.map(f => [f.detail.split(' has no auth')[0], f]))
+    assert.equal(byEndpoint['GET /api/health'].severity, 'info')
+    assert.match(byEndpoint['GET /api/health'].detail, /likely public by design \(health or status check\)/)
+    assert.equal(byEndpoint['POST /api/auth/forgot-password'].severity, 'info')
+    assert.equal(byEndpoint['GET /api/preview'].severity, 'low', 'ordinary unprotected reads keep their severity')
+    assert.equal(byEndpoint['DELETE /api/public'].severity, 'high', 'a path merely named "public" is not exempt')
+    assert.equal(summary.likely_public, 2)
   })
 
   it('points evidence at the module where the handler lives', async () => {

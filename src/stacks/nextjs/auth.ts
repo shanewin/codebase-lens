@@ -25,14 +25,25 @@ export interface AuthSignal {
   line: number
 }
 
-// Header names that carry credentials or request signatures
-const CREDENTIAL_HEADER = /^(authorization|x-api-key|api-key|cookie)$|signature|secret|token|hmac/i
+// Header names that are credentials wherever they're read
+const CREDENTIAL_HEADER = /^(authorization|x-api-key|api-key)$/i
+// Names that suggest a credential only when read from headers or cookies
+const CREDENTIAL_NAME = /signature|secret|token|hmac/i
 
-/** A `.get(x)` argument naming a credential header: a literal like 'x-hub-signature' or a constant like SECRET_HEADER_NAME. */
-function isCredentialHeaderArg(sf: ts.SourceFile, arg: ts.Expression): boolean {
-  if (ts.isStringLiteralLike(arg)) return CREDENTIAL_HEADER.test(arg.text)
-  if (ts.isIdentifier(arg) || ts.isPropertyAccessExpression(arg)) return /SECRET|SIGNATURE|TOKEN|API_?KEY|AUTH/i.test(arg.getText(sf))
-  return false
+/**
+ * Is `receiver.get(arg)` reading a credential? Authorization/API-key headers count by name. Signature, secret, and token
+ * values count only when read from something header- or cookie-like (`request.headers`, `headersList`, `cookieStore`), so
+ * lookups such as `container.get(ServiceModule.token)` don't. CSRF tokens never count: they stop cross-site requests,
+ * not anonymous callers.
+ */
+function isCredentialRead(sf: ts.SourceFile, callee: ts.Expression, arg: ts.Expression): boolean {
+  const argText = ts.isStringLiteralLike(arg) ? arg.text : arg.getText(sf)
+  if (/csrf/i.test(argText)) return false
+  if (ts.isStringLiteralLike(arg) && CREDENTIAL_HEADER.test(arg.text)) return true
+  const receiver = ts.isPropertyAccessExpression(callee) ? callee.expression.getText(sf) : ''
+  if (!/header|cookie/i.test(receiver)) return false
+  if (ts.isStringLiteralLike(arg)) return CREDENTIAL_NAME.test(arg.text)
+  return (ts.isIdentifier(arg) || ts.isPropertyAccessExpression(arg)) && /SECRET|SIGNATURE|TOKEN|API_?KEY|AUTH/i.test(argText)
 }
 
 /** One side of a comparison is a secret: process.env.CRON_SECRET, or a SCREAMING_CASE constant like WEBHOOK_SECRET. */
@@ -52,10 +63,51 @@ function calleeName(expr: ts.Expression): string | null {
   return null
 }
 
-/** Look for auth evidence inside a node, following calls to same-file functions one level deep. */
-export function findAuthSignals(sf: ts.SourceFile, node: ts.Node, authCalls: Set<string>, depth = 0): AuthSignal[] {
+// How many helper calls deep to look for auth evidence: handler → requirePermission() → auth()
+const MAX_HELPER_DEPTH = 2
+
+/** Lets auth detection follow calls into helpers imported from other modules. */
+export interface HelperContext {
+  root: string
+  /** File containing the code being inspected, for resolving its imports */
+  file: string
+  resolver: Resolver
+  /** module + export name + depth → auth evidence found there (shared, so each helper is parsed once) */
+  cache: Map<string, AuthSignal[]>
+}
+
+const helperCaches = new WeakMap<Resolver, Map<string, AuthSignal[]>>()
+
+export function helperContext(root: string, file: string, resolver: Resolver): HelperContext {
+  if (!helperCaches.has(resolver)) helperCaches.set(resolver, new Map())
+  return { root, file, resolver, cache: helperCaches.get(resolver)! }
+}
+
+/** Auth evidence inside an imported function, e.g. `requirePermission` from '@/lib/permissions'. */
+function importedHelperSignals(sf: ts.SourceFile, local: string, authCalls: Set<string>, depth: number, ctx: HelperContext): AuthSignal[] {
+  const binding = importBinding(sf, local)
+  const target = binding ? ctx.resolver.resolve(binding.specifier, ctx.file) : null
+  if (!binding || !target) return []
+  const key = `${target}\0${binding.name}\0${depth}`
+  if (ctx.cache.has(key)) return ctx.cache.get(key)!
+  ctx.cache.set(key, []) // guards against import cycles while this helper is being inspected
+  const targetSf = parseFile(target)
+  const exp = targetSf ? getExports(targetSf).find(e => e.name === binding.name && e.fn) : undefined
+  const signals = targetSf && exp?.fn
+    ? findAuthSignals(targetSf, exp.fn, authCalls, depth + 1, { ...ctx, file: target })
+      .map(s => (s.evidence.includes(' (in ') ? s : { ...s, evidence: `${s.evidence} (in ${relative(ctx.root, target)})` }))
+    : []
+  ctx.cache.set(key, signals)
+  return signals
+}
+
+/**
+ * Look for auth evidence inside a node, following calls into same-file functions and, when `ctx` is given,
+ * into functions imported from other modules (up to MAX_HELPER_DEPTH calls deep).
+ */
+export function findAuthSignals(sf: ts.SourceFile, node: ts.Node, authCalls: Set<string>, depth = 0, ctx?: HelperContext): AuthSignal[] {
   const out: AuthSignal[] = []
-  const localFns = depth === 0 ? collectLocalFunctions(sf) : new Map<string, ts.Node>()
+  const localFns = depth < MAX_HELPER_DEPTH ? collectLocalFunctions(sf) : new Map<string, ts.Node>()
   const visit = (n: ts.Node): void => {
     if (ts.isCallExpression(n)) {
       const name = calleeName(n.expression)
@@ -64,10 +116,13 @@ export function findAuthSignals(sf: ts.SourceFile, node: ts.Node, authCalls: Set
       else if (/\.auth\.getUser$|\.auth\.getSession$|\.auth\.getClaims$/.test(text)) out.push({ kind: 'auth-call', evidence: `${text}()`, line: lineOf(sf, n) })
       else if (name && ((WEBHOOK_SIGNATURE_CALLS.includes(name) && /webhook|stripe|svix|signature|jwt|jose/i.test(sf.text)) || ['createHmac', 'timingSafeEqual'].includes(name))) {
         out.push({ kind: 'webhook-signature', evidence: `${text}()`, line: lineOf(sf, n) })
-      } else if (name === 'get' && n.arguments[0] && isCredentialHeaderArg(sf, n.arguments[0])) {
+      } else if (name === 'get' && n.arguments[0] && isCredentialRead(sf, n.expression, n.arguments[0])) {
         out.push({ kind: 'header-check', evidence: `${text}(${n.arguments[0].getText(sf)})`, line: lineOf(sf, n) })
-      } else if (name && depth === 0 && localFns.has(name)) {
-        const inner = findAuthSignals(sf, localFns.get(name)!, authCalls, depth + 1)
+      } else if (name && depth < MAX_HELPER_DEPTH && localFns.has(name)) {
+        const inner = findAuthSignals(sf, localFns.get(name)!, authCalls, depth + 1, ctx)
+        out.push(...inner.map(s => ({ ...s, evidence: `${name}() → ${s.evidence}` })))
+      } else if (ctx && depth < MAX_HELPER_DEPTH && ts.isIdentifier(n.expression)) {
+        const inner = importedHelperSignals(sf, n.expression.text, authCalls, depth, ctx)
         out.push(...inner.map(s => ({ ...s, evidence: `${name}() → ${s.evidence}` })))
       }
     }
@@ -118,17 +173,38 @@ function importedHandler(sf: ts.SourceFile, init: ts.Expression | undefined): { 
   }
   collect(init)
   for (const local of locals) {
-    for (const s of sf.statements) {
-      if (!ts.isImportDeclaration(s) || !ts.isStringLiteral(s.moduleSpecifier) || !s.importClause) continue
-      if (s.importClause.name?.text === local) return { specifier: s.moduleSpecifier.text, name: 'default' }
-      const nb = s.importClause.namedBindings
-      if (nb && ts.isNamedImports(nb)) {
-        const el = nb.elements.find(e => e.name.text === local)
-        if (el) return { specifier: s.moduleSpecifier.text, name: (el.propertyName ?? el.name).text }
-      }
+    const binding = importBinding(sf, local)
+    if (binding) return binding
+  }
+  return null
+}
+
+/** The module and exported name behind an imported local binding, or null if `local` isn't imported. */
+function importBinding(sf: ts.SourceFile, local: string): { specifier: string; name: string } | null {
+  for (const s of sf.statements) {
+    if (!ts.isImportDeclaration(s) || !ts.isStringLiteral(s.moduleSpecifier) || !s.importClause || s.importClause.isTypeOnly) continue
+    if (s.importClause.name?.text === local) return { specifier: s.moduleSpecifier.text, name: 'default' }
+    const nb = s.importClause.namedBindings
+    if (nb && ts.isNamedImports(nb)) {
+      const el = nb.elements.find(e => e.name.text === local)
+      if (el) return { specifier: s.moduleSpecifier.text, name: (el.propertyName ?? el.name).text }
     }
   }
   return null
+}
+
+// Routes that are normally public on purpose. An unprotected match is still listed, but reported as info.
+const PUBLIC_BY_DESIGN: [RegExp, string][] = [
+  [/(^|\/)(health|healthz|healthcheck|status|ping|ready|readiness|liveness|version)$/, 'health or status check'],
+  [/(^|\/)csrf(-token)?$/, 'CSRF token endpoint'],
+  [/(^|\/)(og|og-image|opengraph-image|twitter-image|robots|sitemap|manifest|favicon|icon|logo|avatar)(\/|$)/, 'public metadata or image'],
+  [/(^|\/)(auth|oauth)\/(.*\/)?(login|signin|sign-in|signup|sign-up|register|forgot-password|reset-password|verify-email|magic-link|callback|token|refresh-?token)$/, 'authentication flow'],
+]
+
+/** Why an unprotected route is probably meant to be public, or null. Dynamic segments are ignored. */
+function publicByDesign(path: string): string | null {
+  const normalized = path.toLowerCase().replace(/\/\[[^\]]+\]/g, '')
+  return PUBLIC_BY_DESIGN.find(([pattern]) => pattern.test(normalized))?.[1] ?? null
 }
 
 /**
@@ -141,7 +217,7 @@ function handlerSignals(root: string, file: string, sf: ts.SourceFile, exp: Expo
   if (wrap) signals.push(wrap)
   const delegated = delegationSignal(sf, exp.init ?? exp.fn)
   if (delegated) signals.push(delegated)
-  if (exp.fn) signals.push(...findAuthSignals(sf, exp.fn, authCalls))
+  if (exp.fn) signals.push(...findAuthSignals(sf, exp.fn, authCalls, 0, helperContext(root, file, resolver)))
   if (signals.length || depth >= 3) return signals
 
   const target = exp.from ? { specifier: exp.from, name: exp.originalName ?? exp.name } : importedHandler(sf, exp.init)
@@ -231,7 +307,7 @@ export function readMiddleware(root: string, authCalls: Set<string>): Middleware
           const prop = config.init.properties.find(pr => ts.isPropertyAssignment(pr) && pr.name.getText(sf) === 'matcher') as ts.PropertyAssignment | undefined
           if (prop) matchers = matcherStrings(prop.initializer)
         }
-        const signals = findAuthSignals(sf, sf, authCalls)
+        const signals = findAuthSignals(sf, sf, authCalls, 0, helperContext(root, p, createResolver(root)))
         return { file: relative(root, p), kind: base as 'middleware' | 'proxy', matchers, hasAuthLogic: signals.length > 0 || sessionCookieGate(sf), signals }
       }
     }
@@ -355,9 +431,10 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
       'and `export { handler as GET }`) and Pages Router API routes. Inspects each handler body with the TypeScript AST for auth calls ' +
       '(auth(), getServerSession, currentUser, supabase.auth.getUser, …), auth wrappers, Authorization/API-key header checks, and webhook signature ' +
       'verification, following calls into same-file helpers. Cross-references the middleware/proxy matcher to show which endpoints are only protected ' +
-      'by middleware. Follows handlers defined in other modules (re-exports and imported functions passed to wrappers), recognizes ' +
+      'by middleware. Follows auth helpers imported from other modules, and handlers defined in other modules (re-exports and imported functions passed to wrappers), recognizes ' +
       'signature and shared-secret checks, and marks tRPC/GraphQL/Auth.js handlers as delegated (auth happens per procedure, or the route ' +
-      'is the auth endpoint). Unprotected mutations (POST/PUT/PATCH/DELETE) are high severity.',
+      'is the auth endpoint). Unprotected mutations (POST/PUT/PATCH/DELETE) are high severity; unprotected routes that are usually public ' +
+      'by design (health checks, CSRF tokens, sign-in flows, OG images) are reported as info with the reason.',
     parameters: {
       type: 'object',
       properties: { auth_functions: EXTRA_PATTERNS_PARAM },
@@ -374,6 +451,8 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
         path: string; method: string; file: string; line: number
         status: 'protected' | 'delegated' | 'middleware-only' | 'unprotected'
         signals: AuthSignal[]
+        /** For unprotected routes that are usually public on purpose: why */
+        likely_public: string | null
       }[] = []
 
       const classify = (path: string, method: string, file: string, line: number, signals: AuthSignal[]) => {
@@ -381,7 +460,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
           : signals.length ? 'delegated'
           : coveredByMiddleware(path) ? 'middleware-only'
           : 'unprotected'
-        endpoints.push({ path, method, file, line, status, signals })
+        endpoints.push({ path, method, file, line, status, signals, likely_public: status === 'unprotected' ? publicByDesign(path) : null })
       }
 
       if (appDir) {
@@ -407,8 +486,9 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
         const mutation = !['GET', 'HEAD', 'OPTIONS'].includes(e.method)
         if (e.status === 'unprotected') {
           findings.push({
-            severity: mutation ? 'high' : 'low',
-            detail: `${e.method} ${e.path} has no auth check in the handler and is not covered by ${mw ? `${mw.kind} matcher` : 'any middleware/proxy'}`,
+            severity: e.likely_public ? 'info' : mutation ? 'high' : 'low',
+            detail: `${e.method} ${e.path} has no auth check in the handler and is not covered by ${mw ? `${mw.kind} matcher` : 'any middleware/proxy'}` +
+              (e.likely_public ? ` — likely public by design (${e.likely_public}); confirm it exposes nothing sensitive` : ''),
             file: `${e.file}:${e.line}`,
             route: e.path,
           })
@@ -431,6 +511,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
         delegated: endpoints.filter(e => e.status === 'delegated').length,
         middleware_only: endpoints.filter(e => e.status === 'middleware-only').length,
         unprotected: endpoints.filter(e => e.status === 'unprotected').length,
+        likely_public: endpoints.filter(e => e.likely_public).length,
       }
       return { summary, middleware: mw, endpoints, findings }
     },
@@ -477,7 +558,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
             if (exp.typeOnly || !exp.fn) continue
             actions.push({
               name: exp.name, file: rel, line: exp.line, type: 'module',
-              auth: findAuthSignals(sf, exp.fn, authCalls), destructive: destructiveEvidence(sf, exp.fn, exp.name),
+              auth: findAuthSignals(sf, exp.fn, authCalls, 0, helperContext(root, file, resolver)), destructive: destructiveEvidence(sf, exp.fn, exp.name),
               data_export: dataExportEvidence(exp.name), cache_only: isCacheOnly(exp.fn),
               validates_input: validation(sf, exp.fn), used_by: [],
             })
@@ -489,7 +570,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
               : ts.isVariableDeclaration(n.parent) && ts.isIdentifier(n.parent.name) ? n.parent.name.text : '(anonymous)'
             actions.push({
               name, file: rel, line: lineOf(sf, n), type: 'inline',
-              auth: findAuthSignals(sf, n, authCalls), destructive: destructiveEvidence(sf, n, name),
+              auth: findAuthSignals(sf, n, authCalls, 0, helperContext(root, file, resolver)), destructive: destructiveEvidence(sf, n, name),
               data_export: dataExportEvidence(name), cache_only: isCacheOnly(n),
               validates_input: validation(sf, n), used_by: [],
             })
