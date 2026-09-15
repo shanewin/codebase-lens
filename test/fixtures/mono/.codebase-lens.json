@@ -1,0 +1,6 @@
+{
+  "severity": {
+    "../../packages/db/index.ts": "medium"
+  },
+  "ignore": ["lib/usedByPackage.ts"]
+}

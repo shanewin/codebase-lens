@@ -7,13 +7,26 @@
   "bin": {
     "codebase-lens": "dist/server.js"
   },
+  "files": [
+    "dist",
+    "knowledge",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shanewin/codebase-lens.git"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsc --watch",
+    "test": "tsc && node --test test/*.test.mjs",
     "fetch-docs": "npx tsx scripts/fetch-docs.ts",
-    "fetch-docs:nextjs": "npx tsx scripts/fetch-docs.ts nextjs",
-    "prebuild": "echo 'Run npm run fetch-docs to update knowledge files (optional)'"
+    "fetch-docs:nextjs": "npx tsx scripts/fetch-docs.ts nextjs"
   },
   "keywords": [
     "mcp",

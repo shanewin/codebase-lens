@@ -3,3 +3,6 @@ dist/
 *.tsbuildinfo
 .claude/
 .env*
+
+# Test fixtures deliberately contain env files
+!test/fixtures/**/.env*
