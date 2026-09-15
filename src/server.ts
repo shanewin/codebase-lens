@@ -88,6 +88,92 @@ if (!PROJECT_PATH) {
 
 const root = resolve(PROJECT_PATH)
 
+// ---------------------------------------------------------------------------
+// Load project rules (.codebase-lens.json)
+// ---------------------------------------------------------------------------
+
+interface LensRules {
+  exempt?: string[]
+  severity?: Record<string, string>
+  ignore?: string[]
+}
+
+function loadRules(projectRoot: string): LensRules {
+  const configPath = join(projectRoot, '.codebase-lens.json')
+  if (!existsSync(configPath)) return {}
+  try {
+    return JSON.parse(readFileSync(configPath, 'utf-8'))
+  } catch {
+    return {}
+  }
+}
+
+function matchesPattern(filePath: string, pattern: string): boolean {
+  if (pattern.endsWith('/*')) {
+    const prefix = pattern.slice(0, -1)
+    return filePath.startsWith(prefix)
+  }
+  return filePath === pattern || filePath.startsWith(pattern + ':')
+}
+
+function matchesRoute(detail: string, pattern: string): boolean {
+  if (pattern.endsWith('/*')) {
+    const prefix = pattern.slice(0, -1)
+    return detail.includes(prefix)
+  }
+  return detail.includes(pattern)
+}
+
+function applyRules(result: any, rules: LensRules): any {
+  if (!result || !Array.isArray(result.findings)) return result
+
+  let findings = result.findings
+
+  // Filter out exempt paths/routes
+  if (rules.exempt?.length) {
+    findings = findings.filter((f: any) => {
+      for (const pattern of rules.exempt!) {
+        if (f.file && matchesPattern(f.file, pattern)) return false
+        if (matchesRoute(f.detail, pattern)) return false
+      }
+      return true
+    })
+  }
+
+  // Filter out ignored file patterns (for unused exports tool)
+  if (rules.ignore?.length && result.unimported_files) {
+    result.unimported_files = result.unimported_files.filter((f: string) => {
+      for (const pattern of rules.ignore!) {
+        if (matchesPattern(f, pattern)) return false
+      }
+      return true
+    })
+  }
+  if (rules.ignore?.length && result.unused_exports) {
+    result.unused_exports = result.unused_exports.filter((e: any) => {
+      for (const pattern of rules.ignore!) {
+        if (e.file && matchesPattern(e.file, pattern)) return false
+      }
+      return true
+    })
+  }
+
+  // Override severity
+  if (rules.severity) {
+    findings = findings.map((f: any) => {
+      for (const [pattern, sev] of Object.entries(rules.severity!)) {
+        if (f.file && matchesPattern(f.file, pattern)) return { ...f, severity: sev }
+        if (matchesRoute(f.detail, pattern)) return { ...f, severity: sev }
+      }
+      return f
+    })
+  }
+
+  return { ...result, findings }
+}
+
+const rules = loadRules(root)
+
 const tools: ToolRegistration[] = []
 const collector: ToolCollector = {
   register(tool: ToolRegistration) {
@@ -150,7 +236,8 @@ for (const tool of tools) {
 
   const handler = async (args: any) => {
     try {
-      const result = await tool.execute(args)
+      const raw = await tool.execute(args)
+      const result = applyRules(raw, rules)
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
       }
@@ -178,7 +265,7 @@ server.resource(
     contents: [{
       uri: uri.href,
       mimeType: 'text/markdown',
-      text: `# Codebase Lens Status\n\nProject: ${root}\n\n${detectionSummary}\n\nTools loaded: ${tools.length}\n\n## Available Tools\n${tools.map(t => `- **${t.name}** — ${t.description.split('.')[0]}`).join('\n')}\n`,
+      text: `# Codebase Lens Status\n\nProject: ${root}\n\n${detectionSummary}\n\nTools loaded: ${tools.length}\n\nRules: ${Object.keys(rules).length > 0 ? `loaded from .codebase-lens.json (${rules.exempt?.length ?? 0} exemptions, ${Object.keys(rules.severity ?? {}).length} severity overrides, ${rules.ignore?.length ?? 0} ignore patterns)` : 'none (no .codebase-lens.json found)'}\n\n## Available Tools\n${tools.map(t => `- **${t.name}** — ${t.description.split('.')[0]}`).join('\n')}\n`,
     }],
   }),
 )
