@@ -1,11 +1,11 @@
 {
-  "name": "codebase-lens",
-  "version": "0.3.0",
-  "description": "MCP server that gives Claude Code deep Next.js intelligence — AST-based route trees, server/client boundaries, auth coverage, and dead export detection.",
+  "name": "nextjs-lens",
+  "version": "0.4.0",
+  "description": "Deep Next.js analysis for Claude Code (MCP server) and import policy checks for CI: route trees, server/client boundaries, auth coverage, dead exports, and enforceable client-bundle rules.",
   "type": "module",
   "main": "dist/server.js",
   "bin": {
-    "codebase-lens": "dist/server.js"
+    "nextjs-lens": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -27,7 +27,8 @@
     "test": "tsc && node --test test/*.test.mjs",
     "fetch-docs": "npx tsx scripts/fetch-docs.ts",
     "snapshot": "tsc && node scripts/snapshot.mjs",
-    "check": "tsc && node scripts/check.mjs"
+    "check": "tsc && node scripts/check.mjs",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "mcp",
@@ -37,7 +38,10 @@
     "nextjs",
     "next.js",
     "app-router",
-    "server-components"
+    "server-components",
+    "policy",
+    "ci",
+    "sarif"
   ],
   "license": "MIT",
   "dependencies": {

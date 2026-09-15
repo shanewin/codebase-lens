@@ -2,10 +2,12 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // ---------------------------------------------------------------------------
-// Project rules (.codebase-lens.json): exemptions, severity overrides, ignore patterns
+// Project rules (.nextjs-lens.json): exemptions, severity overrides, ignore patterns
 // ---------------------------------------------------------------------------
 
-export const RULES_FILE = '.codebase-lens.json'
+export const RULES_FILE = '.nextjs-lens.json'
+/** The file's name before the project was renamed from codebase-lens; still read when RULES_FILE is absent */
+export const LEGACY_RULES_FILE = '.codebase-lens.json'
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info']
 const KNOWN_KEYS = ['exempt', 'severity', 'ignore', 'authFunctions']
@@ -33,7 +35,7 @@ const EMPTY_RULES: LensRules = { exempt: [], severity: {}, ignore: [], authFunct
 
 /** Load the first rules file found in `dirs` (PROJECT_PATH, then the analyzed app directory). */
 export function loadRules(dirs: string[]): LoadedRules {
-  const path = [...new Set(dirs)].map(d => join(d, RULES_FILE)).find(p => existsSync(p)) ?? null
+  const path = [...new Set(dirs)].flatMap(d => [join(d, RULES_FILE), join(d, LEGACY_RULES_FILE)]).find(p => existsSync(p)) ?? null
   if (!path) return { rules: EMPTY_RULES, path: null, error: null }
 
   let raw: any

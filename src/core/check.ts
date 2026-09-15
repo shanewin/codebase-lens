@@ -29,7 +29,7 @@ export interface CheckViolation extends PolicyViolation {
 export type BaselineAction = 'check' | 'update' | 'prune'
 
 export interface CheckOptions {
-  /** Monorepo app to check (like CODEBASE_LENS_APP) */
+  /** Monorepo app to check (like NEXTJS_LENS_APP) */
   app?: string
   baseline?: BaselineAction
 }
@@ -208,7 +208,7 @@ function pushList<T>(lines: string[], title: string, items: T[], line: (item: T)
 /** Human-readable report for terminals and CI logs. */
 export function formatReport(report: CheckReport): string {
   if (!report.ok) {
-    return [`codebase-lens check could not run: ${report.error}`, ...report.problems.map(p => `  - ${p}`)].join('\n')
+    return [`nextjs-lens check could not run: ${report.error}`, ...report.problems.map(p => `  - ${p}`)].join('\n')
   }
 
   const b = report.baseline

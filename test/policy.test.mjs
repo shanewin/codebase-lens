@@ -7,7 +7,7 @@ import { loadPolicy, parsePolicy } from '../dist/core/policy.js'
 
 const dirWith = content => {
   const dir = mkdtempSync(join(tmpdir(), 'lens-policy-'))
-  if (content !== undefined) writeFileSync(join(dir, 'codebase-lens.policy.json'), typeof content === 'string' ? content : JSON.stringify(content))
+  if (content !== undefined) writeFileSync(join(dir, 'nextjs-lens.policy.json'), typeof content === 'string' ? content : JSON.stringify(content))
   return dir
 }
 

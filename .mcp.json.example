@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "codebase-lens": {
-      "command": "node",
-      "args": ["/path/to/codebase-lens/dist/server.js"],
+    "nextjs-lens": {
+      "command": "npx",
+      "args": ["-y", "nextjs-lens"],
       "env": {
         "PROJECT_PATH": "/path/to/your/project"
       }

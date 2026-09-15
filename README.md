@@ -1,8 +1,8 @@
-# codebase-lens
+# nextjs-lens
 
 An MCP server that gives Claude Code (or any MCP client) deep insight into Next.js projects.
 
-Claude can read a `page.tsx` file on its own. What it can't easily do is hold the whole app in its head: which layout wraps which page, where `'use client'` pulls a subtree into the browser bundle, which route handlers skip auth, or which exports nothing imports. codebase-lens parses your project with the TypeScript compiler API and answers those questions directly.
+Claude can read a `page.tsx` file on its own. What it can't easily do is hold the whole app in its head: which layout wraps which page, where `'use client'` pulls a subtree into the browser bundle, which route handlers skip auth, or which exports nothing imports. nextjs-lens parses your project with the TypeScript compiler API and answers those questions directly.
 
 ## Why
 
@@ -11,18 +11,18 @@ We tested the same security audit question on a 90-file Next.js app across diffe
 | Config | Correct findings | Hallucinations | Cost |
 |--------|-----------------|----------------|------|
 | Haiku alone | ~5 of 27 | 7 false positives | $0.19 |
-| **Haiku + codebase-lens** | **~23 of 27** | **0** | **$0.10** |
+| **Haiku + nextjs-lens** | **~23 of 27** | **0** | **$0.10** |
 | Opus alone | ~20 of 27 | 2 false positives | $0.47 |
-| **Opus + codebase-lens** | **~24 of 27** | **0** | **$0.65** |
+| **Opus + nextjs-lens** | **~24 of 27** | **0** | **$0.65** |
 
-Haiku with codebase-lens outperformed Opus without it — at one-fifth the cost, in a quarter of the time, with zero hallucinations. Without tools, Haiku invented security issues that don't exist (fake CSRF problems, nonexistent password handling). With tools, it reported only what the code actually shows.
+Haiku with nextjs-lens outperformed Opus without it — at one-fifth the cost, in a quarter of the time, with zero hallucinations. Without tools, Haiku invented security issues that don't exist (fake CSRF problems, nonexistent password handling). With tools, it reported only what the code actually shows.
 
 ## How it works
 
 ```
 Your Next.js project
     ↓ PROJECT_PATH
-codebase-lens (MCP server over stdio)
+nextjs-lens (MCP server over stdio)
     ├── Next.js tools (AST-based; PROJECT_PATH must be a Next.js app or a monorepo containing one)
     ├── Generic scanners (files, search, imports, styles)
     └── Knowledge resources (official docs + community gotchas)
@@ -30,28 +30,16 @@ codebase-lens (MCP server over stdio)
 
 ## Quick Start
 
-### 1. Clone and build
+### 1. Add to your project
 
-Requires Node.js 20.11 or later.
-
-```bash
-git clone https://github.com/shanewin/codebase-lens.git
-cd codebase-lens
-npm install
-npm run fetch-docs   # pull the latest Next.js docs (optional, recommended)
-npm run build
-```
-
-### 2. Add to your project
-
-Create `.mcp.json` in your project root:
+Requires Node.js 20.11 or later. Create `.mcp.json` in your project root:
 
 ```json
 {
   "mcpServers": {
-    "codebase-lens": {
-      "command": "node",
-      "args": ["/absolute/path/to/codebase-lens/dist/server.js"],
+    "nextjs-lens": {
+      "command": "npx",
+      "args": ["-y", "nextjs-lens"],
       "env": {
         "PROJECT_PATH": "/absolute/path/to/your/project"
       }
@@ -60,11 +48,25 @@ Create `.mcp.json` in your project root:
 }
 ```
 
-In a monorepo, point `PROJECT_PATH` at the repo root: codebase-lens analyzes the Next.js app with the most routes. To choose a different app, set `"CODEBASE_LENS_APP": "apps/admin"` (a path relative to `PROJECT_PATH`) in `env`. If no Next.js app is found, the server exits with an error explaining why.
+To run from source instead (for development, or to refresh the bundled Next.js docs):
 
-To tune findings for your project (exempt public routes, raise severities, ignore legacy files), add a [`.codebase-lens.json`](#project-rules) file.
+```bash
+git clone https://github.com/shanewin/codebase-lens.git
+cd codebase-lens
+npm install
+npm run fetch-docs   # pull the latest Next.js docs (optional)
+npm run build
+```
 
-### 3. Use it
+Then use `"command": "node"` and `"args": ["/absolute/path/to/codebase-lens/dist/server.js"]` in `.mcp.json`.
+
+In a monorepo, point `PROJECT_PATH` at the repo root: nextjs-lens analyzes the Next.js app with the most routes. To choose a different app, set `"NEXTJS_LENS_APP": "apps/admin"` (a path relative to `PROJECT_PATH`) in `env`. If no Next.js app is found, the server exits with an error explaining why.
+
+To tune findings for your project (exempt public routes, raise severities, ignore legacy files), add a [`.nextjs-lens.json`](#project-rules) file.
+
+This project was previously called codebase-lens. Existing `.codebase-lens.json` files and the `CODEBASE_LENS_APP` variable still work.
+
+### 2. Use it
 
 Open Claude Code in your project. The tools are available automatically. Try:
 
@@ -114,7 +116,7 @@ Results are compact by default so they fit comfortably in Claude's context on la
 
 ## Project Rules
 
-Add `.codebase-lens.json` to `PROJECT_PATH` (or to the analyzed app's directory) to adapt findings to your project:
+Add `.nextjs-lens.json` to `PROJECT_PATH` (or to the analyzed app's directory) to adapt findings to your project:
 
 ```json
 {
@@ -145,7 +147,7 @@ Rules match a finding's `file` and `route` fields, never its message text. Resul
 
 ## Policy Checks
 
-Write down which code may import what, and check it in CI. Add `codebase-lens.policy.json` to the project root (or the app directory):
+Write down which code may import what, and check it in CI. Add `nextjs-lens.policy.json` to the project root (or the app directory):
 
 ```json
 {
@@ -165,9 +167,11 @@ Write down which code may import what, and check it in CI. Add `codebase-lens.po
 ```
 
 ```bash
-npm run check -- /path/to/project           # readable report
-npm run --silent check -- /path/to/project --json   # machine-readable, includes exit_code
+npx nextjs-lens check /path/to/project          # readable report
+npx nextjs-lens check /path/to/project --json   # machine-readable, includes exit_code
 ```
+
+From a source checkout, `npm run check -- /path/to/project` does the same (add `--silent` before `check` when piping `--json`).
 
 | Rule | Checks |
 |------|--------|
@@ -199,11 +203,11 @@ The policy file fails closed: an unknown key, a misspelled rule name, or a bad v
 An existing app usually breaks a new policy in a few places already. A baseline records those, so you can switch to `enforce` right away and fail only on new violations:
 
 ```bash
-npm run check -- /path/to/project --update-baseline   # record every current violation in codebase-lens.baseline.json
-npm run check -- /path/to/project --prune-baseline    # remove violations that have been fixed; never adds new ones
+npx nextjs-lens check /path/to/project --update-baseline   # record every current violation in nextjs-lens.baseline.json
+npx nextjs-lens check /path/to/project --prune-baseline    # remove violations that have been fixed; never adds new ones
 ```
 
-Commit `codebase-lens.baseline.json` next to the policy file and protect it with `CODEOWNERS` too, since adding an entry allows a violation. Violations are matched by rule, file, and what they import, not by line number, so unrelated edits don't make known violations look new. A second offending import of the same thing in the same file is still new.
+Commit `nextjs-lens.baseline.json` next to the policy file and protect it with `CODEOWNERS` too, since adding an entry allows a violation. Violations are matched by rule, file, and what they import, not by line number, so unrelated edits don't make known violations look new. A second offending import of the same thing in the same file is still new.
 
 Each report lists new violations in full, known ones in a short list, and baseline entries that no longer occur, so the baseline can shrink as code is fixed. An invalid baseline file stops the check (exit code 2) instead of being ignored; `--update-baseline` regenerates it. Renaming a rule makes its baselined violations new, since the rule name is part of the match.
 
@@ -234,8 +238,8 @@ Use exceptions for decisions about a single import, and `except` in the policy f
 `--sarif <file>` also writes the violations that count (not baselined, not allowed by an exception) in [SARIF](https://sarifweb.azurewebsites.net/), which GitHub code scanning shows on pull requests at the offending line. Run the check against the repository root so the paths line up.
 
 ```yaml
-# .github/workflows/codebase-lens.yml
-name: codebase-lens
+# .github/workflows/nextjs-lens.yml
+name: nextjs-lens
 on: [pull_request]
 permissions:
   contents: read
@@ -248,12 +252,11 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - run: git clone --depth 1 https://github.com/shanewin/codebase-lens /tmp/codebase-lens && npm ci --prefix /tmp/codebase-lens && npm run build --prefix /tmp/codebase-lens
-      - run: node /tmp/codebase-lens/scripts/check.mjs . --sarif codebase-lens.sarif
+      - run: npx -y nextjs-lens@0.4 check . --sarif nextjs-lens.sarif
       - uses: github/codeql-action/upload-sarif@v3
-        if: always() && hashFiles('codebase-lens.sarif') != ''
+        if: always() && hashFiles('nextjs-lens.sarif') != ''
         with:
-          sarif_file: codebase-lens.sarif
+          sarif_file: nextjs-lens.sarif
 ```
 
 The check step fails the job in `enforce` mode; the upload runs either way. Code scanning is free for public repositories; private repositories need GitHub Advanced Security. Without it, the check step's log still shows every violation.
@@ -269,15 +272,20 @@ Markdown knowledge files are exposed as MCP resources that Claude can read:
 
 ```
 src/
+├── cli.ts                 # The nextjs-lens command: starts the MCP server, or runs `check`
 ├── server.ts              # MCP entry point, app resolution, rules, tool registration
 ├── core/
 │   ├── types.ts           # ToolRegistration, ToolCollector interfaces
 │   ├── helpers.ts         # safePath, walkFiles, file utilities
-│   ├── rules.ts           # .codebase-lens.json loading and matching
-│   ├── policy.ts          # codebase-lens.policy.json loading and validation
+│   ├── rules.ts           # .nextjs-lens.json loading and matching
+│   ├── policy.ts          # nextjs-lens.policy.json loading and validation
 │   ├── check.ts           # Runs policy rules and builds the check report
+│   ├── checkCli.ts        # `nextjs-lens check` arguments and output
+│   ├── baseline.ts        # nextjs-lens.baseline.json: known violations
+│   ├── exceptions.ts      # // lens-allow inline exceptions
+│   ├── sarif.ts           # SARIF output for GitHub code scanning
 │   ├── runner.ts          # Runs every Next.js tool with timings (snapshot script)
-│   └── workspace.ts       # Finds the Next.js app (PROJECT_PATH, CODEBASE_LENS_APP, or monorepo workspaces)
+│   └── workspace.ts       # Finds the Next.js app (PROJECT_PATH, NEXTJS_LENS_APP, or monorepo workspaces)
 ├── scanners/              # Generic tools
 │   ├── files.ts           # File listing, reading, searching
 │   ├── imports.ts         # Import/dependency tracing

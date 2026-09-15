@@ -32,12 +32,12 @@ describe('server startup', () => {
   })
 })
 
-describe('server over MCP (monorepo root with .codebase-lens.json)', () => {
+describe('server over MCP (monorepo root with .nextjs-lens.json)', () => {
   let client
 
   before(async () => {
     const transport = new StdioClientTransport({ command: process.execPath, args: [SERVER], env: { ...process.env, PROJECT_PATH: fixture('mono') }, stderr: 'pipe' })
-    client = new Client({ name: 'codebase-lens-test', version: '1.0.0' })
+    client = new Client({ name: 'nextjs-lens-test', version: '1.0.0' })
     await client.connect(transport)
   })
 
@@ -60,7 +60,7 @@ describe('server over MCP (monorepo root with .codebase-lens.json)', () => {
     const status = await client.readResource({ uri: 'lens://status' })
     const text = status.contents[0].text
     assert.match(text, /analyzing Next\.js app at apps\/site/)
-    assert.match(text, /Rules: loaded from .*\.codebase-lens\.json \(0 exemptions, 1 severity overrides, 1 ignore patterns, 0 auth functions\)/)
+    assert.match(text, /Rules: loaded from .*\.nextjs-lens\.json \(0 exemptions, 1 severity overrides, 1 ignore patterns, 0 auth functions\)/)
   })
 
   it('exposes knowledge files as resources, one per docs page', async () => {
@@ -98,7 +98,7 @@ describe('server over MCP (monorepo root with .codebase-lens.json)', () => {
   })
 })
 
-describe('server with authFunctions in .codebase-lens.json', () => {
+describe('server with authFunctions in a legacy .codebase-lens.json', () => {
   let client
   let dir
 
@@ -123,10 +123,11 @@ describe('server with authFunctions in .codebase-lens.json', () => {
       '}',
       '',
     ].join('\n'))
+    // The pre-rename file name, which must keep working
     writeFileSync(join(dir, '.codebase-lens.json'), JSON.stringify({ authFunctions: ['makeSureLoggedIn'] }))
 
     const transport = new StdioClientTransport({ command: process.execPath, args: [SERVER], env: { ...process.env, PROJECT_PATH: dir }, stderr: 'pipe' })
-    client = new Client({ name: 'codebase-lens-test', version: '1.0.0' })
+    client = new Client({ name: 'nextjs-lens-test', version: '1.0.0' })
     await client.connect(transport)
   })
 

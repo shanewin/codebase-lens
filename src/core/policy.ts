@@ -2,13 +2,13 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // ---------------------------------------------------------------------------
-// Team policy (codebase-lens.policy.json): conventions the check command enforces
+// Team policy (nextjs-lens.policy.json): conventions the check command enforces
 // ---------------------------------------------------------------------------
 //
-// Kept apart from .codebase-lens.json so it can be protected with CODEOWNERS. Unlike the rules file, loading
+// Kept apart from .nextjs-lens.json so it can be protected with CODEOWNERS. Unlike the rules file, loading
 // fails closed: any problem makes the whole policy invalid, because a typo must never quietly switch a check off.
 
-export const POLICY_FILE = 'codebase-lens.policy.json'
+export const POLICY_FILE = 'nextjs-lens.policy.json'
 
 export const POLICY_MODES = ['off', 'warn', 'enforce'] as const
 export type PolicyMode = (typeof POLICY_MODES)[number]

@@ -10,6 +10,7 @@ const CLI = fileURLToPath(new URL('../scripts/check.mjs', import.meta.url))
 
 const run = (...args) => {
   const env = { ...process.env }
+  delete env.NEXTJS_LENS_APP
   delete env.CODEBASE_LENS_APP
   const out = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env })
   return { code: out.status, stdout: out.stdout, stderr: out.stderr }
@@ -21,7 +22,7 @@ const project = () => tempProject({
   'src/app/about/page.tsx': "import { Box } from '../../components/Box'\nimport { db } from '../../server/db'\nexport default function About() { return <Box /> }\n",
   'src/components/Box.tsx': "'use client'\nimport fs from 'fs'\nexport function Box() { return null }\n",
   'src/server/db.ts': 'export const db = 1\n',
-  'codebase-lens.policy.json': {
+  'nextjs-lens.policy.json': {
     version: 1,
     mode: 'warn',
     rules: {
@@ -40,7 +41,7 @@ describe('SARIF output', () => {
     const sarif = JSON.parse(readFileSync(out, 'utf8'))
     assert.equal(sarif.version, '2.1.0')
     const [runResult] = sarif.runs
-    assert.equal(runResult.tool.driver.name, 'codebase-lens')
+    assert.equal(runResult.tool.driver.name, 'nextjs-lens')
     assert.deepEqual(runResult.tool.driver.rules.map(r => [r.id, r.defaultConfiguration.level]).sort(), [
       ['client-bundle/fs-never-ships', 'warning'],
       ['forbidden-imports/no-server-code-in-routes', 'error'],
@@ -53,7 +54,7 @@ describe('SARIF output', () => {
     const forbidden = runResult.results.find(r => r.ruleId.startsWith('forbidden'))
     assert.match(forbidden.message.text, /Fix: Use a server action/)
     assert.match(runResult.results.find(r => r.ruleId.startsWith('client')).message.text, /Chain: src\/components\/Box\.tsx → fs/)
-    assert.match(forbidden.partialFingerprints['codebaseLens/v1'], /^[0-9a-f]{32}$/)
+    assert.match(forbidden.partialFingerprints['nextjsLens/v1'], /^[0-9a-f]{32}$/)
   })
 
   it('requires a file path and writes nothing when the check cannot run', () => {

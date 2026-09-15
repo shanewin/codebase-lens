@@ -429,7 +429,7 @@ function authCallSet(extra?: string): Set<string> {
 
 const EXTRA_PATTERNS_PARAM = {
   type: 'string',
-  description: 'Comma-separated names of project-specific auth functions to treat as auth checks, e.g. "requireOrgMember,assertAdmin" (optional). Names listed in .codebase-lens.json authFunctions are always included.',
+  description: 'Comma-separated names of project-specific auth functions to treat as auth checks, e.g. "requireOrgMember,assertAdmin" (optional). Names listed in .nextjs-lens.json authFunctions are always included.',
 }
 
 export function registerAuthTools(tools: ToolCollector, root: string, appDir: string | null, pagesDir: string | null): void {

@@ -174,7 +174,7 @@ export interface Finding {
   severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   detail: string
   file?: string
-  /** URL path the finding is about; .codebase-lens.json route patterns match this, never the detail text */
+  /** URL path the finding is about; .nextjs-lens.json route patterns match this, never the detail text */
   route?: string
   /** For findings that list many routes: the routes, with `summary` being the detail text before the list */
   routes?: string[]

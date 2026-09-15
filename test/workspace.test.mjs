@@ -17,7 +17,7 @@ describe('resolveNextApp', () => {
     assert.match(result.note, /Other Next\.js apps: apps\/docs/)
   })
 
-  it('honors CODEBASE_LENS_APP', () => {
+  it('honors NEXTJS_LENS_APP', () => {
     assert.equal(resolveNextApp(fixture('mono'), 'apps/docs').appRoot, fixture('mono/apps/docs'))
   })
 

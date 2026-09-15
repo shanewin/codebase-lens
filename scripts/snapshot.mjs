@@ -10,7 +10,7 @@
  *   npm run snapshot -- /path/to/project --update   accept the current results as the new snapshot
  *
  * Exit code: 0 = no changes (or a snapshot was saved), 1 = results changed, 2 = could not run.
- * Snapshots are stored in .lens-snapshots/ (gitignored). CODEBASE_LENS_APP picks a monorepo app, as for the server.
+ * Snapshots are stored in .lens-snapshots/ (gitignored). NEXTJS_LENS_APP picks a monorepo app, as for the server.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -45,7 +45,7 @@ async function main() {
   const { diffSnapshots, normalize } = await load('stacks/nextjs/snapshot.js')
 
   const projectPath = resolve(target)
-  const resolution = resolveNextApp(projectPath, process.env.CODEBASE_LENS_APP)
+  const resolution = resolveNextApp(projectPath, process.env.NEXTJS_LENS_APP || process.env.CODEBASE_LENS_APP || undefined)
   if ('error' in resolution) {
     console.error(resolution.error)
     process.exit(2)
@@ -80,7 +80,7 @@ async function main() {
   }
 
   const previous = JSON.parse(readFileSync(file, 'utf8'))
-  const since = `the snapshot from ${previous.created} (codebase-lens ${previous.lens_version}${previous.lens_commit ? ` @ ${previous.lens_commit}` : ''})`
+  const since = `the snapshot from ${previous.created} (nextjs-lens ${previous.lens_version}${previous.lens_commit ? ` @ ${previous.lens_commit}` : ''})`
   const reports = diffSnapshots(previous, current)
   if (!reports.length) {
     console.log(`\nNo changes since ${since}.`)

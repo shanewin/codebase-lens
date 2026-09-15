@@ -145,7 +145,7 @@ export type NextAppResolution =
   | { ok: false; error: string }
 
 /**
- * Decide which Next.js app to analyze: the CODEBASE_LENS_APP override if given, else PROJECT_PATH itself,
+ * Decide which Next.js app to analyze: the NEXTJS_LENS_APP override if given, else PROJECT_PATH itself,
  * else (in a monorepo) the workspace app with the most routes.
  */
 export function resolveNextApp(projectPath: string, override?: string): NextAppResolution {
@@ -156,14 +156,14 @@ export function resolveNextApp(projectPath: string, override?: string): NextAppR
       const found = findNextApps(root)
       return {
         ok: false,
-        error: `CODEBASE_LENS_APP="${override}" is not a Next.js app (no next.config.* and no "next" dependency).` +
+        error: `NEXTJS_LENS_APP="${override}" is not a Next.js app (no next.config.* and no "next" dependency).` +
           (found.length ? ` Next.js apps found: ${found.map(a => a.relPath).join(', ')}.` : ''),
       }
     }
     return {
       ok: true,
       appRoot: overridePath,
-      note: overridePath === root ? null : `Analyzing Next.js app at ${relative(root, overridePath)} (CODEBASE_LENS_APP). Tool file paths are relative to that directory.`,
+      note: overridePath === root ? null : `Analyzing Next.js app at ${relative(root, overridePath)} (NEXTJS_LENS_APP). Tool file paths are relative to that directory.`,
     }
   }
 
@@ -181,7 +181,7 @@ export function resolveNextApp(projectPath: string, override?: string): NextAppR
     appRoot: chosen.path,
     note:
       `Monorepo: analyzing Next.js app at ${chosen.relPath}, the app with the most routes (${chosen.routeFiles} route files). ` +
-      (others.length ? `Other Next.js apps: ${others.map(a => `${a.relPath} (${a.routeFiles} route files)`).join(', ')}. Set CODEBASE_LENS_APP to analyze one of these instead. ` : '') +
+      (others.length ? `Other Next.js apps: ${others.map(a => `${a.relPath} (${a.routeFiles} route files)`).join(', ')}. Set NEXTJS_LENS_APP to analyze one of these instead. ` : '') +
       'Tool file paths are relative to that app directory.',
   }
 }

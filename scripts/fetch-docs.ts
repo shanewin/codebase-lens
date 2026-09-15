@@ -16,9 +16,9 @@ import { join } from 'node:path'
 
 const OUT_DIR = join(import.meta.dirname, '..', 'knowledge', 'nextjs', 'docs')
 const DOCS_BASE = 'https://nextjs.org/docs/app/'
-const USER_AGENT = 'codebase-lens-docs-fetcher'
+const USER_AGENT = 'nextjs-lens-docs-fetcher'
 
-// Pages behind codebase-lens's tools, grouped by what they inform
+// Pages behind nextjs-lens's tools, grouped by what they inform
 const PAGES: { path: string; topic: string }[] = [
   { path: 'getting-started/project-structure', topic: 'Routing and file conventions' },
   { path: 'getting-started/layouts-and-pages', topic: 'Routing and file conventions' },

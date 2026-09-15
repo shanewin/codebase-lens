@@ -77,9 +77,9 @@ if (!PROJECT_PATH) {
   console.error('Example .mcp.json:')
   console.error(JSON.stringify({
     mcpServers: {
-      'codebase-lens': {
-        command: 'node',
-        args: ['path/to/codebase-lens/dist/server.js'],
+      'nextjs-lens': {
+        command: 'npx',
+        args: ['-y', 'nextjs-lens'],
         env: { PROJECT_PATH: '/path/to/your/project' },
       },
     },
@@ -101,8 +101,9 @@ registerFileTools(collector, root)
 registerImportTools(collector, root)
 registerStyleTools(collector, root)
 
-// 2. Locate the Next.js app (PROJECT_PATH, CODEBASE_LENS_APP, or a monorepo's main app) and register its tools
-const resolution = resolveNextApp(root, process.env.CODEBASE_LENS_APP)
+// 2. Locate the Next.js app (PROJECT_PATH, NEXTJS_LENS_APP, or a monorepo's main app) and register its tools
+// CODEBASE_LENS_APP is the pre-rename name, still honored
+const resolution = resolveNextApp(root, process.env.NEXTJS_LENS_APP || process.env.CODEBASE_LENS_APP || undefined)
 if (!resolution.ok) {
   console.error(`ERROR: ${resolution.error}`)
   process.exit(1)
@@ -110,10 +111,10 @@ if (!resolution.ok) {
 const appRoot = resolution.appRoot
 registerNextjsTools(collector, appRoot)
 
-// 3. Project rules (.codebase-lens.json in PROJECT_PATH or the app directory)
+// 3. Project rules (.nextjs-lens.json in PROJECT_PATH or the app directory)
 const loadedRules = loadRules([root, appRoot])
 const rules = loadedRules.rules
-if (loadedRules.error) console.error(`codebase-lens: ${loadedRules.path}: ${loadedRules.error}`)
+if (loadedRules.error) console.error(`nextjs-lens: ${loadedRules.path}: ${loadedRules.error}`)
 
 const detectionSummary = [`Next.js app: ${appRoot}`, resolution.note].filter(Boolean).join('\n\n')
 
@@ -122,8 +123,8 @@ const detectionSummary = [`Next.js app: ${appRoot}`, resolution.note].filter(Boo
 // ---------------------------------------------------------------------------
 
 const server = new McpServer({
-  name: 'codebase-lens',
-  version: '0.3.0',
+  name: 'nextjs-lens',
+  version: '0.4.0',
 })
 
 // Tools with a summarizer get a `detail` parameter: a compact summary by default, the complete result on request
@@ -148,7 +149,7 @@ for (const tool of tools) {
   const handler = async (args: any) => {
     try {
       const { detail, ...toolArgs } = args ?? {}
-      // Auth functions declared in .codebase-lens.json apply to every call of a tool that accepts auth_functions
+      // Auth functions declared in .nextjs-lens.json apply to every call of a tool that accepts auth_functions
       if (rules.authFunctions.length && tool.parameters.properties.auth_functions) {
         const passed = typeof toolArgs.auth_functions === 'string' ? toolArgs.auth_functions.split(',') : []
         toolArgs.auth_functions = [...new Set([...rules.authFunctions, ...passed].map(s => s.trim()).filter(Boolean))].join(',')
@@ -179,7 +180,7 @@ for (const tool of tools) {
 
 // Register a meta resource with detection info
 server.resource(
-  'codebase-lens:status',
+  'nextjs-lens:status',
   'lens://status',
   { mimeType: 'text/markdown' },
   async (uri) => ({

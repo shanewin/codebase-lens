@@ -43,7 +43,7 @@ export function toSarif(report: CheckResult, toolVersion: string): object {
       }],
       // Same identity as baselines, so an alert survives the import moving to another line
       partialFingerprints: {
-        'codebaseLens/v1': createHash('sha256').update(JSON.stringify([v.ruleType, v.rule, v.file, v.target])).digest('hex').slice(0, 32),
+        'nextjsLens/v1': createHash('sha256').update(JSON.stringify([v.ruleType, v.rule, v.file, v.target])).digest('hex').slice(0, 32),
       },
     }
   })
@@ -54,7 +54,7 @@ export function toSarif(report: CheckResult, toolVersion: string): object {
     runs: [{
       tool: {
         driver: {
-          name: 'codebase-lens',
+          name: 'nextjs-lens',
           version: toolVersion,
           informationUri: 'https://github.com/shanewin/codebase-lens',
           rules: [...rules.values()],

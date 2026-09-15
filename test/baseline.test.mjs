@@ -35,8 +35,8 @@ describe('matchBaseline', () => {
 
 describe('loadBaseline', () => {
   const file = content => {
-    const root = tempProject({ 'codebase-lens.baseline.json': content })
-    return join(root, 'codebase-lens.baseline.json')
+    const root = tempProject({ 'nextjs-lens.baseline.json': content })
+    return join(root, 'nextjs-lens.baseline.json')
   }
 
   it('rejects malformed files and entries', () => {
@@ -47,7 +47,7 @@ describe('loadBaseline', () => {
   })
 
   it('returns no baseline and no error when the file is absent', () => {
-    assert.deepEqual(loadBaseline('/nonexistent/codebase-lens.baseline.json'), { baseline: null, error: null })
+    assert.deepEqual(loadBaseline('/nonexistent/nextjs-lens.baseline.json'), { baseline: null, error: null })
   })
 })
 
@@ -62,17 +62,18 @@ describe('check with a baseline', () => {
     'src/app/page.tsx': "import { db } from '../server/db'\nexport default function Page() { return null }\n",
     'src/app/about/page.tsx': 'export default function About() { return null }\n',
     'src/server/db.ts': 'export const db = 1\n',
-    'codebase-lens.policy.json': POLICY,
+    'nextjs-lens.policy.json': POLICY,
   })
 
   const run = (root, ...flags) => {
     const env = { ...process.env }
+    delete env.NEXTJS_LENS_APP
     delete env.CODEBASE_LENS_APP
     const out = spawnSync(process.execPath, [CLI, root, ...flags], { encoding: 'utf8', env })
     return { code: out.status, stdout: out.stdout, stderr: out.stderr, json: flags.includes('--json') ? JSON.parse(out.stdout) : null }
   }
   const write = (root, path, content) => writeFileSync(join(root, path), content)
-  const baselineFile = root => JSON.parse(readFileSync(join(root, 'codebase-lens.baseline.json'), 'utf8'))
+  const baselineFile = root => JSON.parse(readFileSync(join(root, 'nextjs-lens.baseline.json'), 'utf8'))
 
   it('records existing violations so enforce mode passes, and keeps passing when lines move', () => {
     const root = project()
@@ -80,7 +81,7 @@ describe('check with a baseline', () => {
 
     const updated = run(root, '--update-baseline')
     assert.equal(updated.code, 0)
-    assert.match(updated.stdout, /Baseline updated: 1 violation recorded in codebase-lens\.baseline\.json/)
+    assert.match(updated.stdout, /Baseline updated: 1 violation recorded in nextjs-lens\.baseline\.json/)
     assert.deepEqual(baselineFile(root), {
       version: 1,
       entries: [{ rule: 'no server code in routes', ruleType: 'forbidden-imports', file: 'src/app/page.tsx', target: 'src/server/db.ts', count: 1 }],
@@ -99,7 +100,7 @@ describe('check with a baseline', () => {
     write(root, 'src/app/about/page.tsx', "import { db } from '../../server/db'\nexport default function About() { return null }\n")
     const { code, stdout } = run(root)
     assert.equal(code, 1)
-    assert.match(stdout, /Baseline: codebase-lens\.baseline\.json \(1 known violation\)/)
+    assert.match(stdout, /Baseline: nextjs-lens\.baseline\.json \(1 known violation\)/)
     assert.match(stdout, /\nsrc\/app\/about\/page\.tsx\n  1:  error  no server code in routes\n/)
     assert.match(stdout, /In the baseline \(known, not failing\): 1\n  src\/app\/page\.tsx:1  no server code in routes/)
     assert.match(stdout, /1 new error, 0 new warnings\.\nFailed: 1 new error in enforce mode\./)
@@ -117,16 +118,16 @@ describe('check with a baseline', () => {
 
     const pruned = run(root, '--prune-baseline')
     assert.equal(pruned.code, 1)
-    assert.match(pruned.stdout, /Baseline pruned: removed 1 fixed violation from codebase-lens\.baseline\.json; 0 remain\./)
+    assert.match(pruned.stdout, /Baseline pruned: removed 1 fixed violation from nextjs-lens\.baseline\.json; 0 remain\./)
     assert.deepEqual(baselineFile(root), { version: 1, entries: [] })
   })
 
   it('refuses to run with an invalid baseline, and --update-baseline repairs it', () => {
     const root = project()
-    write(root, 'codebase-lens.baseline.json', '{ "version": 2 }')
+    write(root, 'nextjs-lens.baseline.json', '{ "version": 2 }')
     const broken = run(root)
     assert.equal(broken.code, 2)
-    assert.match(broken.stderr, /codebase-lens\.baseline\.json is invalid, so nothing was checked/)
+    assert.match(broken.stderr, /nextjs-lens\.baseline\.json is invalid, so nothing was checked/)
     assert.equal(run(root, '--update-baseline').code, 0)
     assert.equal(run(root).code, 0)
   })
@@ -135,7 +136,7 @@ describe('check with a baseline', () => {
     const root = project()
     const prune = run(root, '--prune-baseline')
     assert.equal(prune.code, 2)
-    assert.match(prune.stderr, /There is no codebase-lens\.baseline\.json to prune/)
+    assert.match(prune.stderr, /There is no nextjs-lens\.baseline\.json to prune/)
     const both = run(root, '--update-baseline', '--prune-baseline')
     assert.equal(both.code, 2)
     assert.match(both.stderr, /either --update-baseline or --prune-baseline/)

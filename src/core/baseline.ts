@@ -3,14 +3,14 @@ import { dirname, join } from 'node:path'
 import type { PolicyViolation } from '../stacks/nextjs/forbidden.js'
 
 // ---------------------------------------------------------------------------
-// Policy baseline (codebase-lens.baseline.json): known violations that don't fail the check
+// Policy baseline (nextjs-lens.baseline.json): known violations that don't fail the check
 // ---------------------------------------------------------------------------
 //
 // Lets a team turn a policy on in an app that already breaks it: today's violations are recorded, and only new
 // ones fail. Committed next to the policy file. Violations are identified by rule, file, and what they reached,
 // never line numbers, so unrelated edits don't make known violations look new.
 
-export const BASELINE_FILE = 'codebase-lens.baseline.json'
+export const BASELINE_FILE = 'nextjs-lens.baseline.json'
 
 const RULE_TYPES: PolicyViolation['ruleType'][] = ['forbidden-imports', 'client-bundle']
 

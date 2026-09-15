@@ -40,10 +40,11 @@ describe('check with inline exceptions', () => {
     'package.json': { name: 'exceptions-fixture', dependencies: { next: '16.0.0' } },
     'src/app/page.tsx': `${page}\nexport default function Page() { return null }\n`,
     'src/server/db.ts': 'export const db = 1\n',
-    'codebase-lens.policy.json': POLICY,
+    'nextjs-lens.policy.json': POLICY,
   })
   const run = (root, ...flags) => {
     const env = { ...process.env }
+    delete env.NEXTJS_LENS_APP
     delete env.CODEBASE_LENS_APP
     const out = spawnSync(process.execPath, [CLI, root, ...flags], { encoding: 'utf8', env })
     return { code: out.status, stdout: out.stdout, stderr: out.stderr, json: flags.includes('--json') ? JSON.parse(out.stdout) : null }
@@ -85,7 +86,7 @@ describe('check with inline exceptions', () => {
   it('never records excepted violations in the baseline', () => {
     const root = project("// lens-allow forbidden-imports: reads a build-time constant only\nimport { db } from '../server/db'")
     assert.equal(run(root, '--update-baseline').code, 0)
-    assert.deepEqual(JSON.parse(readFileSync(join(root, 'codebase-lens.baseline.json'), 'utf8')).entries, [])
+    assert.deepEqual(JSON.parse(readFileSync(join(root, 'nextjs-lens.baseline.json'), 'utf8')).entries, [])
     // Removing the exception makes the violation new, not silently baselined
     writeFileSync(join(root, 'src/app/page.tsx'), "import { db } from '../server/db'\nexport default function Page() { return null }\n")
     assert.equal(run(root).code, 1)

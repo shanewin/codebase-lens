@@ -211,7 +211,7 @@ export function registerNextjsTools(tools: ToolCollector, appRoot: string): void
     parameters: {
       type: 'object',
       properties: {
-        auth_functions: { type: 'string', description: 'Comma-separated names of project-specific auth functions to treat as auth logic (optional). Names listed in .codebase-lens.json authFunctions are always included.' },
+        auth_functions: { type: 'string', description: 'Comma-separated names of project-specific auth functions to treat as auth logic (optional). Names listed in .nextjs-lens.json authFunctions are always included.' },
       },
       required: [],
     },

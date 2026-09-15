@@ -66,7 +66,7 @@ describe('applyRules', () => {
 describe('loadRules', () => {
   const dirWith = content => {
     const dir = mkdtempSync(join(tmpdir(), 'lens-rules-'))
-    if (content !== undefined) writeFileSync(join(dir, '.codebase-lens.json'), content)
+    if (content !== undefined) writeFileSync(join(dir, '.nextjs-lens.json'), content)
     return dir
   }
 
@@ -92,5 +92,16 @@ describe('loadRules', () => {
     assert.deepEqual(loaded.rules, { exempt: ['/api/health'], severity: { b: 'low' }, ignore: [], authFunctions: [] })
     assert.match(loaded.error, /severity for "a"/)
     assert.match(loaded.error, /unknown key "extra"/)
+  })
+
+  it('reads the pre-rename .codebase-lens.json, preferring .nextjs-lens.json when both exist', () => {
+    const legacy = mkdtempSync(join(tmpdir(), 'lens-rules-'))
+    writeFileSync(join(legacy, '.codebase-lens.json'), JSON.stringify({ exempt: ['/old'] }))
+    assert.deepEqual(loadRules([legacy]).rules.exempt, ['/old'])
+
+    writeFileSync(join(legacy, '.nextjs-lens.json'), JSON.stringify({ exempt: ['/new'] }))
+    const both = loadRules([legacy])
+    assert.deepEqual(both.rules.exempt, ['/new'])
+    assert.match(both.path, /\.nextjs-lens\.json$/)
   })
 })
