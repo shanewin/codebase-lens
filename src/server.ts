@@ -191,17 +191,19 @@ server.resource(
 // Register knowledge files as MCP resources
 // ---------------------------------------------------------------------------
 // Knowledge files live in knowledge/nextjs/ and come in two flavors:
-//   - docs.md    — auto-fetched from official docs (run scripts/fetch-docs.ts)
+//   - docs/*.md    — official docs pages, one per file plus docs/index.md (run npm run fetch-docs)
 //   - community.md — human-maintained best practices and gotchas
 
 const knowledgeDir = join(import.meta.dirname, '..', 'knowledge', 'nextjs')
-const knowledgeFiles = existsSync(knowledgeDir) ? readdirSync(knowledgeDir).filter(f => f.endsWith('.md')) : []
+const knowledgeFiles = existsSync(knowledgeDir)
+  ? readdirSync(knowledgeDir, { recursive: true, encoding: 'utf-8' }).filter(f => f.endsWith('.md')).map(f => f.split('\\').join('/')).sort()
+  : []
 
 for (const file of knowledgeFiles) {
   const filePath = join(knowledgeDir, file)
 
   server.resource(
-    `knowledge:nextjs:${file.replace('.md', '')}`,
+    `knowledge:nextjs:${file.replace(/\.md$/, '').split('/').join(':')}`,
     `lens://knowledge/nextjs/${file}`,
     { mimeType: 'text/markdown' },
     async (uri) => {

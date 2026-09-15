@@ -1,128 +1,116 @@
 #!/usr/bin/env npx tsx
 /**
- * Docs fetcher — runs at build time to pull official documentation
- * and save condensed versions as knowledge files.
+ * Docs fetcher: pulls a curated set of official Next.js docs pages into knowledge/nextjs/docs/.
  *
- * Usage: npx tsx scripts/fetch-docs.ts [stack]
- *   npx tsx scripts/fetch-docs.ts          # fetch all
- *   npx tsx scripts/fetch-docs.ts nextjs   # fetch only Next.js
+ * nextjs.org serves every docs page as Markdown when `.md` is appended to its URL, so no HTML scraping is needed.
+ * Each page becomes its own file (and its own MCP resource) plus an index, so Claude reads only the page a question
+ * needs instead of one large dump.
  *
- * Each stack defines a list of doc URLs and a transform function
- * that extracts the useful parts. Output goes to knowledge/{stack}/docs.md
+ * Usage: npm run fetch-docs
+ *
+ * All pages are fetched before anything is written, so a failed run leaves the existing docs untouched.
  */
 
-import { writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const KNOWLEDGE_DIR = join(import.meta.dirname, '..', 'knowledge')
+const OUT_DIR = join(import.meta.dirname, '..', 'knowledge', 'nextjs', 'docs')
+const DOCS_BASE = 'https://nextjs.org/docs/app/'
+const USER_AGENT = 'codebase-lens-docs-fetcher'
 
-interface DocSource {
+// Pages behind codebase-lens's tools, grouped by what they inform
+const PAGES: { path: string; topic: string }[] = [
+  { path: 'getting-started/project-structure', topic: 'Routing and file conventions' },
+  { path: 'getting-started/layouts-and-pages', topic: 'Routing and file conventions' },
+  { path: 'api-reference/file-conventions/parallel-routes', topic: 'Routing and file conventions' },
+  { path: 'api-reference/file-conventions/route-segment-config', topic: 'Routing and file conventions' },
+  { path: 'getting-started/server-and-client-components', topic: 'Server and Client Components' },
+  { path: 'getting-started/route-handlers', topic: 'Route handlers, proxy, and security' },
+  { path: 'getting-started/proxy', topic: 'Route handlers, proxy, and security' },
+  { path: 'guides/data-security', topic: 'Route handlers, proxy, and security' },
+  { path: 'api-reference/config/next-config-js/serverActions', topic: 'Route handlers, proxy, and security' },
+  { path: 'getting-started/fetching-data', topic: 'Data fetching and caching' },
+  { path: 'getting-started/caching', topic: 'Data fetching and caching' },
+  { path: 'guides/caching-without-cache-components', topic: 'Data fetching and caching' },
+  { path: 'guides/environment-variables', topic: 'Configuration' },
+  { path: 'guides/upgrading/version-16', topic: 'Upgrading' },
+]
+
+interface Page {
+  path: string
+  topic: string
+  file: string
+  title: string
+  description: string
   url: string
-  label: string
+  body: string
 }
 
-interface StackDocs {
-  name: string
-  sources: DocSource[]
-  transform: (responses: { label: string; text: string }[]) => string
+async function fetchText(url: string): Promise<string> {
+  const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT } })
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`)
+  return res.text()
 }
 
-async function fetchPage(url: string): Promise<string> {
-  try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'codebase-lens-docs-fetcher/0.1' },
-    })
-    if (!res.ok) return `[Failed to fetch: ${res.status}]`
-    return await res.text()
-  } catch (err: any) {
-    return `[Fetch error: ${err.message}]`
-  }
-}
-
-function extractTextFromHtml(html: string): string {
-  // Strip HTML tags, decode common entities, collapse whitespace
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<nav[\s\S]*?<\/nav>/gi, '')
-    .replace(/<footer[\s\S]*?<\/footer>/gi, '')
-    .replace(/<header[\s\S]*?<\/header>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
+/** Split the YAML-ish frontmatter nextjs.org puts on Markdown pages from the body. */
+function parsePage(markdown: string, fallbackUrl: string): { title: string; description: string; url: string; body: string } {
+  const match = markdown.match(/^---\n([\s\S]*?)\n---\n/)
+  const front = match?.[1] ?? ''
+  const field = (name: string) => front.match(new RegExp(`^${name}:\\s*"?(.+?)"?\\s*$`, 'm'))?.[1] ?? ''
+  const body = markdown
+    .slice(match ? match[0].length : 0)
+    // Every page repeats a pointer to the site-wide index; the generated index replaces it
+    .replace(/^> For an index of all Next\.js documentation, see .*\n/m, '')
+    // Site-relative links are dead ends outside nextjs.org
+    .replace(/\]\(\/docs\//g, '](https://nextjs.org/docs/')
     .trim()
-    .slice(0, 15000) // Cap at ~15KB per page to keep knowledge files manageable
+  return { title: field('title'), description: field('description'), url: field('url') || fallbackUrl, body }
 }
 
-// ---------------------------------------------------------------------------
-// Stack doc definitions
-// ---------------------------------------------------------------------------
+async function main(): Promise<void> {
+  console.log(`Fetching ${PAGES.length} Next.js docs pages as Markdown…`)
 
-const NEXT_JS_DOCS: StackDocs = {
-  name: 'nextjs',
-  sources: [
-    { url: 'https://nextjs.org/docs/app/getting-started/project-structure', label: 'Project Structure' },
-    { url: 'https://nextjs.org/docs/app/building-your-application/routing', label: 'Routing' },
-    { url: 'https://nextjs.org/docs/app/building-your-application/data-fetching', label: 'Data Fetching' },
-    { url: 'https://nextjs.org/docs/app/building-your-application/rendering', label: 'Rendering' },
-    { url: 'https://nextjs.org/docs/app/api-reference/next-config-js', label: 'next.config.js' },
-    { url: 'https://nextjs.org/docs/app/building-your-application/configuring/environment-variables', label: 'Environment Variables' },
-  ],
-  transform(responses) {
-    const header = `# Next.js Documentation (auto-fetched)\n\nFetched: ${new Date().toISOString().split('T')[0]}\n\nThis file is auto-generated by \`scripts/fetch-docs.ts\`. Do not edit manually.\nFor community-maintained best practices, see \`community.md\` in this directory.\n\n`
+  const index = await fetchText('https://nextjs.org/docs/llms.txt')
+  const version = index.match(/Next\.js (\d+\.\d+\.\d+)/)?.[1] ?? 'unknown'
 
-    const sections = responses.map(r => {
-      const text = extractTextFromHtml(r.text)
-      return `## ${r.label}\n\n${text}\n`
-    })
-
-    return header + sections.join('\n---\n\n')
-  },
-}
-
-const ALL_STACKS: StackDocs[] = [NEXT_JS_DOCS]
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
-async function fetchStack(stack: StackDocs): Promise<void> {
-  console.log(`\n📚 Fetching ${stack.name} docs (${stack.sources.length} pages)...`)
-
-  const responses: { label: string; text: string }[] = []
-  for (const source of stack.sources) {
-    process.stdout.write(`  → ${source.label}...`)
-    const text = await fetchPage(source.url)
-    responses.push({ label: source.label, text })
-    console.log(` ${Math.round(text.length / 1024)}KB`)
+  const pages: Page[] = []
+  for (const { path, topic } of PAGES) {
+    const url = `${DOCS_BASE}${path}`
+    const parsed = parsePage(await fetchText(`${url}.md`), url)
+    const file = `${path.split('/').pop()}.md`
+    if (pages.some(p => p.file === file)) throw new Error(`Two pages would both be written to ${file}`)
+    pages.push({ path, topic, file, ...parsed })
+    console.log(`  ✓ ${path} (${Math.round(parsed.body.length / 1024)} KB)`)
   }
 
-  const output = stack.transform(responses)
-  const outDir = join(KNOWLEDGE_DIR, stack.name)
-  mkdirSync(outDir, { recursive: true })
-  const outPath = join(outDir, 'docs.md')
-  writeFileSync(outPath, output)
-  console.log(`  ✓ Wrote ${outPath} (${Math.round(output.length / 1024)}KB)`)
+  const fetched = new Date().toISOString().split('T')[0]
+  if (existsSync(OUT_DIR)) rmSync(OUT_DIR, { recursive: true })
+  mkdirSync(OUT_DIR, { recursive: true })
+
+  for (const page of pages) {
+    const header =
+      `<!-- Auto-generated by scripts/fetch-docs.ts from ${page.url} (Next.js ${version}, fetched ${fetched}). Do not edit. -->\n\n` +
+      `# ${page.title}\n\n> ${page.description}\n>\n> Source: ${page.url}\n\n`
+    writeFileSync(join(OUT_DIR, page.file), header + page.body + '\n')
+  }
+
+  const topics = [...new Set(pages.map(p => p.topic))]
+  const indexMd =
+    `<!-- Auto-generated by scripts/fetch-docs.ts. Do not edit. -->\n\n` +
+    `# Next.js documentation (selected pages)\n\n` +
+    `Official Next.js ${version} docs, fetched ${fetched}. Each page is a separate resource; read only the ones a question needs.\n` +
+    `For patterns and gotchas the docs don't cover, see \`lens://knowledge/nextjs/community.md\`.\n\n` +
+    topics.map(topic =>
+      `## ${topic}\n\n` +
+      pages.filter(p => p.topic === topic).map(p => `- [${p.title}](lens://knowledge/nextjs/docs/${p.file}): ${p.description}`).join('\n'),
+    ).join('\n\n') + '\n'
+  writeFileSync(join(OUT_DIR, 'index.md'), indexMd)
+
+  const totalKb = Math.round(pages.reduce((sum, p) => sum + p.body.length, 0) / 1024)
+  console.log(`Wrote ${pages.length} pages + index.md to ${OUT_DIR} (${totalKb} KB, Next.js ${version})`)
 }
 
-const targetStack = process.argv[2]
-
-if (targetStack) {
-  const stack = ALL_STACKS.find(s => s.name === targetStack)
-  if (!stack) {
-    console.error(`Unknown stack: ${targetStack}. Available: ${ALL_STACKS.map(s => s.name).join(', ')}`)
-    process.exit(1)
-  }
-  await fetchStack(stack)
-} else {
-  for (const stack of ALL_STACKS) {
-    await fetchStack(stack)
-  }
-}
-
-console.log('\n✅ Done. Knowledge files updated.')
+main().catch(err => {
+  console.error(`Docs fetch failed; existing docs left untouched.\n${err.message}`)
+  process.exit(1)
+})

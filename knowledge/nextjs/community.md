@@ -1,54 +1,84 @@
-# Next.js — Community Knowledge
+# Next.js: Community Knowledge
 
 > **This file is maintained by contributors.** Add patterns, gotchas, and best practices
 > that the official docs don't cover well. PRs welcome.
 >
-> Last updated: 2026-09-14
+> Last updated: 2026-09-15. Written against Next.js 16.3.5; notes call out where behavior
+> differs in Next.js 15 or depends on Cache Components. For the official pages, start at
+> `lens://knowledge/nextjs/docs/index.md`.
 
 ## Security Checklist
 
-- [ ] `poweredByHeader: false` in next.config — prevents leaking `X-Powered-By: Next.js`
-- [ ] `reactStrictMode: true` — catches common React bugs in development
-- [ ] No secrets in `NEXT_PUBLIC_` env vars — these are embedded in the client bundle
-- [ ] `.env.local` in `.gitignore` — never commit local env files
-- [ ] Middleware/proxy protects authenticated routes — check for auth logic in `middleware.ts` or `proxy.ts`
-- [ ] Server actions validate auth before mutations — `'use server'` functions are reachable via direct POST
-- [ ] `serverActions.allowedOrigins` set in next.config — prevents CSRF on server actions
-- [ ] CSP headers configured via `headers()` in next.config or middleware
-- [ ] API routes validate request origin/auth — Route Handlers (`route.ts`) have no built-in protection
+- [ ] No secrets in `NEXT_PUBLIC_` env vars. They are inlined into the client JavaScript at build time.
+- [ ] `.env*.local` is in `.gitignore`. `.env`, `.env.development`, and `.env.production` can be committed only if they contain no secrets.
+- [ ] Authentication and authorization are checked **inside every Server Action**. Actions your app uses are reachable by a direct POST with their action ID; unused actions are removed at build time.
+- [ ] Authentication is checked **inside every Route Handler**. Route Handlers have no built-in protection, and relying only on a proxy matcher means one matcher change silently exposes routes.
+- [ ] Webhook routes verify the provider's signature (Stripe, GitHub, Svix, …), and cron routes check a shared secret.
+- [ ] `import 'server-only'` in modules that hold secrets or database access, so importing them from client code fails the build.
+- [ ] `serverActions.allowedOrigins` is set **only** when Server Action requests arrive through another host, such as a reverse proxy. Next.js already rejects actions whose `Origin` host doesn't match the app's host; avoid wildcards.
+- [ ] `poweredByHeader: false` in `next.config`, so responses don't advertise `X-Powered-By: Next.js`.
+- [ ] Security headers (Content-Security-Policy, Strict-Transport-Security, X-Content-Type-Options) are set via `headers()` in `next.config` or in proxy. Check whether your host already adds HSTS.
+- [ ] Pages Router only: `reactStrictMode: true`. The App Router has had Strict Mode on by default since Next.js 13.5.1.
+
+## Next.js 16 changes that bite
+
+### `middleware` is now `proxy`
+`middleware.ts` is deprecated and renamed to `proxy.ts`, with the exported function renamed to `proxy`. Proxy always runs on the Node.js runtime, so apps that need the edge runtime should keep `middleware` for now. The upgrade codemod handles the rename:
+```bash
+npx @next/codemod@canary upgrade latest
+```
+
+### Request APIs are async only
+The synchronous compatibility from Next.js 15 is gone. `cookies()`, `headers()`, `draftMode()`, `params` (in layouts, pages, route handlers, and `default.js`), and `searchParams` (in pages) must be awaited:
+```bash
+npx @next/codemod@canary next-async-request-api .
+npx next typegen   # generates PageProps, LayoutProps, and RouteContext type helpers
+```
+
+### Every parallel route slot needs `default.js`
+Builds fail when a slot has no `default.js`. To keep the previous behavior, add one that calls `notFound()` or returns `null`.
+
+### `revalidateTag` takes a cache profile
+`revalidateTag('posts')` becomes `revalidateTag('posts', 'max')`, which serves stale content while it revalidates. For read-your-writes inside a Server Action, use `updateTag` instead.
+
+### Turbopack is the default bundler
+`next dev` and `next build` use Turbopack. If `next.config` has a custom `webpack` option (sometimes added by a plugin), `next build` fails. Migrate it to Turbopack-compatible options, build with `--webpack` to keep Webpack, or build with `--turbopack` to ignore the `webpack` config.
+
+### `next lint` is gone
+Run ESLint or Biome directly. `next build` no longer lints, and the `eslint` option in `next.config` was removed.
 
 ## Common Gotchas
 
-### `route.ts` and `page.tsx` can't coexist
-A folder with both `route.ts` and `page.tsx` is invalid. The route handler wins and the page is ignored. This causes silent failures.
+### `page` and `route` can't share a segment
+`app/page.js` next to `app/route.js` is a conflict. Put handlers in their own segment, such as `app/api/…/route.js`.
 
 ### Server Components are the default
-In the App Router, all components are Server Components unless you add `'use client'` at the top. This means:
+In the App Router, components are Server Components unless the file starts with `'use client'`. That means:
 - No `useState`, `useEffect`, or browser APIs without `'use client'`
-- `onClick` and other event handlers need `'use client'`
-- Server Components can `await` directly and access databases
+- Event handlers like `onClick` need a Client Component
+- Server Components can `await` data directly
 
 ### `error.tsx` must be a Client Component
-The `error.tsx` boundary requires `'use client'` at the top. Without it, you get a build error. Same for `global-error.tsx`.
+`error.tsx` and `global-error.tsx` need `'use client'` at the top, or the build fails.
 
-### Dynamic segments in parallel routes
-If you use `@slot` parallel routes, every slot needs a `default.tsx` fallback. Missing this causes 404s during soft navigation when the slot has no matching content.
+### What `default.js` does in parallel routes
+During soft (client-side) navigation, slots that don't match the new URL keep their previous content. After a hard navigation (a refresh), Next.js can't recover that state, so it renders the slot's `default.js`, or a 404 if there is none.
 
-### Middleware runs on every request
-Middleware executes on ALL routes by default. Always use the `matcher` config to scope it, or you'll add latency to static assets. Common matcher pattern:
-```
+### There are two caching models
+Check `next.config` before applying caching advice:
+- **Cache Components** (`cacheComponents: true`): caching is opt-in with `'use cache'`, `cacheLife`, and `cacheTag`. The route segment options `dynamic`, `revalidate`, and `fetchCache` are removed.
+- **Previous model** (no `cacheComponents`): `fetch` is not cached by default. Cache a request with `cache: 'force-cache'` or `next: { revalidate }`, or configure a segment with `dynamic` / `revalidate`. Before Next.js 15, `fetch` was cached by default, so upgraded apps can get slower without code changes.
+
+### Proxy runs on every request unless you scope it
+Without a `matcher`, proxy runs for every route, including static assets. A common matcher:
+```ts
 export const config = {
-  matcher: ['/((?!api|_next/static|_next/image|favicon.ico).*)']
+  matcher: ['/((?!api|_next/static|_next/image|favicon.ico).*)'],
 }
 ```
 
-### `fetch()` caching changed in Next.js 15
-Before v15: `fetch()` was cached by default (`force-cache`).
-After v15: `fetch()` is NOT cached by default (`no-store`).
-This is a breaking change when upgrading — pages that were fast via caching become slow.
-
 ### `generateStaticParams` doesn't mean fully static
-A page with `generateStaticParams` is pre-rendered at build time for the listed params, but new params at runtime still work (they're rendered on-demand unless `dynamicParams = false`).
+Pages with `generateStaticParams` are prerendered at build time for the listed params. Other params still render on demand unless `dynamicParams = false`.
 
 ## File Organization Patterns
 
@@ -58,7 +88,7 @@ app/
 ├── (public)/          ← no auth required
 │   ├── page.tsx       ← landing page
 │   └── about/
-├── (authenticated)/   ← middleware protects these
+├── (authenticated)/   ← proxy redirects signed-out users; pages and handlers still check auth
 │   ├── dashboard/
 │   └── settings/
 └── (auth)/            ← login/signup flows
@@ -67,47 +97,48 @@ app/
 ```
 
 ### Colocating related files
-Since only `page.tsx` and `route.ts` create routes, you can put components, tests, and styles right next to them:
+Only `page` and `route` files create routes, so components, tests, and styles can sit next to them:
 ```
 app/dashboard/
-├── page.tsx           ← the route
+├── page.tsx            ← the route
 ├── dashboard-chart.tsx ← not routable, just a component
-├── actions.ts         ← server actions
-└── dashboard.test.ts  ← tests
+├── actions.ts          ← server actions
+└── dashboard.test.ts   ← tests
 ```
 
 ### Server actions in separate files
-Keep `'use server'` in dedicated action files rather than inline. This makes auth checks consistent and actions reusable:
+Keep `'use server'` in dedicated action files rather than inline. Auth checks stay consistent, and actions are reusable:
 ```
 app/dashboard/
 ├── page.tsx
-└── actions.ts         ← 'use server' at top, all exports are server actions
+└── actions.ts          ← 'use server' at top; every export is a server action
 ```
 
 ## Performance Patterns
 
 ### Use `loading.tsx` for instant navigation
-Every route segment can have a `loading.tsx`. This shows immediately during navigation while the page's data loads, making the app feel fast.
+Every route segment can have a `loading.tsx`. It shows immediately during navigation while the page's data loads.
 
-### Parallel data fetching in Server Components
-Don't `await` sequentially — use `Promise.all`:
+### Fetch in parallel in Server Components
+Don't `await` independent requests one after another:
 ```tsx
-// Bad: sequential (slow)
+// Slow: sequential
 const user = await getUser()
 const posts = await getPosts()
 
-// Good: parallel (fast)
+// Fast: parallel
 const [user, posts] = await Promise.all([getUser(), getPosts()])
 ```
 
-### Route segment config for caching
+### Route segment config (previous caching model only)
+These options don't exist when Cache Components is enabled:
 ```tsx
-// Force static generation (fail build if dynamic)
+// Force static rendering; error if the route uses dynamic APIs
 export const dynamic = 'error'
 
-// ISR: revalidate every 60 seconds
+// Revalidate at most every 60 seconds
 export const revalidate = 60
 
-// Force dynamic (no caching)
+// Force dynamic rendering (no caching)
 export const dynamic = 'force-dynamic'
 ```

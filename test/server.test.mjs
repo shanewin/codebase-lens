@@ -59,6 +59,16 @@ describe('server over MCP (monorepo root with .codebase-lens.json)', () => {
     assert.match(text, /Rules: loaded from .*\.codebase-lens\.json \(0 exemptions, 1 severity overrides, 1 ignore patterns\)/)
   })
 
+  it('exposes knowledge files as resources, one per docs page', async () => {
+    const { resources } = await client.listResources()
+    const uris = resources.map(r => r.uri)
+    for (const uri of ['lens://knowledge/nextjs/community.md', 'lens://knowledge/nextjs/docs/index.md', 'lens://knowledge/nextjs/docs/proxy.md']) {
+      assert.ok(uris.includes(uri), `missing ${uri}`)
+    }
+    const index = await client.readResource({ uri: 'lens://knowledge/nextjs/docs/index.md' })
+    assert.match(index.contents[0].text, /lens:\/\/knowledge\/nextjs\/docs\/caching\.md/)
+  })
+
   it('applies ignore patterns to tool results', async () => {
     const result = await call('find_unused_exports')
     assert.deepEqual(result.unused_exports, [])

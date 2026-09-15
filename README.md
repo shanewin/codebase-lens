@@ -143,10 +143,10 @@ Rules match a finding's `file` and `route` fields, never its message text. Resul
 
 ## Knowledge Resources
 
-Two Markdown files are exposed as MCP resources that Claude can read:
+Markdown knowledge files are exposed as MCP resources that Claude can read:
 
-- **`knowledge/nextjs/docs.md`**: official Next.js docs, auto-fetched. Refresh with `npm run fetch-docs`. Don't edit by hand.
-- **`knowledge/nextjs/community.md`**: security checklist, gotchas, and patterns the official docs don't cover well. **This is where contributors add the most value.** PRs welcome.
+- **`knowledge/nextjs/docs/`**: selected official Next.js docs pages (routing, Server and Client Components, route handlers, proxy, data security, caching, environment variables, the version 16 upgrade guide), one resource per page, plus `docs/index.md` listing them. `npm run fetch-docs` refreshes them from nextjs.org's Markdown versions; don't edit them by hand.
+- **`knowledge/nextjs/community.md`**: security checklist, Next.js 16 changes, gotchas, and patterns the official docs don't cover well. **This is where contributors add the most value.** PRs welcome.
 
 ## Architecture
 
