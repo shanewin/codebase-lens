@@ -9,6 +9,7 @@ import { readMiddleware, matcherMatches, registerAuthTools } from './nextjs/auth
 import { registerBoundaryTools } from './nextjs/boundaries.js'
 import { buildAppTree, registerRouteTools, resolveAppRoutes, type Finding } from './nextjs/routes.js'
 import { registerDataFetchingTools } from './nextjs/fetching.js'
+import { SUMMARIES } from './nextjs/summaries.js'
 import { registerUnusedTools } from './nextjs/unused.js'
 
 const SECRET_ENV_NAME = /SECRET|PRIVATE|PASSWORD|PASSWD|SERVICE_ROLE|CREDENTIAL|(ADMIN|MASTER|WRITE|ACCESS|SERVER|SIGNING|ENCRYPTION)_?(KEY|TOKEN)|DATABASE_URL|CONNECTION_STRING/i
@@ -103,6 +104,9 @@ function get(obj: ConfigValue | undefined, path: string): ConfigValue | undefine
 export function registerNextjsTools(tools: ToolCollector, appRoot: string): void {
   // Tools compare and join absolute paths, so normalize a relative root up front
   const root = resolve(appRoot)
+  // Every Next.js tool returns a compact summary by default; complete results stay available with detail: 'full'
+  const collector = tools
+  tools = { register: tool => collector.register(Object.hasOwn(SUMMARIES, tool.name) ? { ...tool, summarize: SUMMARIES[tool.name] } : tool) }
   const appDir = findDir(root, ['src/app', 'app'])
   const pagesDir = findDir(root, ['src/pages', 'pages'])
 

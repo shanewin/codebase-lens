@@ -80,6 +80,8 @@ Open Claude Code in your project. The tools are available automatically. Try:
 
 Every tool parses source with the TypeScript compiler API (`ts.createSourceFile`), not regex. That means it handles multi-line exports, `export const GET = withAuth(...)`, `export { handler as POST }`, re-export barrels, and tsconfig path aliases.
 
+Results are compact by default so they fit comfortably in Claude's context on large apps: counts, every finding, and one-line lists. Pass `detail: "full"` to any Next.js tool for complete per-item data (layout chains, file lists, auth evidence, fetch options).
+
 **Whole-app analysis**
 
 | Tool | What it does |

@@ -65,6 +65,17 @@ describe('server over MCP (monorepo root with .codebase-lens.json)', () => {
     assert.deepEqual(result.rules_applied, { exempted: 0, severity_overridden: 0, ignored: 1 })
   })
 
+  it('returns a summary by default and the full result on request', async () => {
+    const summary = await call('map_client_boundaries')
+    assert.equal(summary.detail, 'summary')
+    assert.equal(summary.client_bundle_files, undefined)
+    assert.equal(typeof summary.counts.client_bundle_files, 'number')
+
+    const full = await call('map_client_boundaries', { detail: 'full' })
+    assert.equal(full.detail, undefined)
+    assert.ok(Array.isArray(full.client_bundle_files))
+  })
+
   it('applies severity overrides to tool results', async () => {
     const result = await call('map_client_boundaries')
     const leak = result.findings.find(f => f.detail.includes('"pg"'))

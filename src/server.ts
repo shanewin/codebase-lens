@@ -127,17 +127,34 @@ const server = new McpServer({
   version: '0.2.0',
 })
 
+// Tools with a summarizer get a `detail` parameter: a compact summary by default, the complete result on request
+const DETAIL_PARAM: PropertySchema = {
+  type: 'string',
+  enum: ['summary', 'full'],
+  default: 'summary',
+  description: "'summary' (default): counts, all findings, and compact lists sized for large apps. 'full': every per-item field.",
+}
+
 // Register each collected tool
 for (const tool of tools) {
-  const hasProperties = Object.keys(tool.parameters.properties).length > 0
+  const properties = tool.summarize ? { ...tool.parameters.properties, detail: DETAIL_PARAM } : tool.parameters.properties
+  const description = tool.summarize
+    ? `${tool.description} Returns a compact summary by default; pass detail: 'full' for complete per-item data.`
+    : tool.description
+  const hasProperties = Object.keys(properties).length > 0
   const shape = hasProperties
-    ? buildZodShape(tool.parameters.properties, tool.parameters.required)
+    ? buildZodShape(properties, tool.parameters.required)
     : undefined
 
   const handler = async (args: any) => {
     try {
-      const raw = await tool.execute(args)
-      const result = applyRules(raw, rules)
+      const { detail, ...toolArgs } = args ?? {}
+      const raw = await tool.execute(toolArgs)
+      // Rules first, so summaries count and list only what survives exemptions and ignores
+      const ruled = applyRules(raw, rules)
+      const result = tool.summarize && detail !== 'full' && !ruled?.error
+        ? { ...tool.summarize(ruled), ...(ruled?.rules_applied ? { rules_applied: ruled.rules_applied } : {}), detail: 'summary' }
+        : ruled
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
       }
@@ -150,9 +167,9 @@ for (const tool of tools) {
   }
 
   if (shape) {
-    server.tool(tool.name, tool.description, shape, handler)
+    server.tool(tool.name, description, shape, handler)
   } else {
-    server.tool(tool.name, tool.description, handler)
+    server.tool(tool.name, description, handler)
   }
 }
 
