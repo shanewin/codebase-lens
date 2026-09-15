@@ -188,11 +188,26 @@ Globs are relative to the app directory and use the same patterns as project rul
 
 | Exit code | When |
 |-----------|------|
-| 0 | No error-severity violations, or `mode` is `warn` or `off` |
-| 1 | `mode` is `enforce` and there is at least one error-severity violation |
-| 2 | The check could not run: no policy file, an invalid policy (every problem is listed), or no Next.js app |
+| 0 | No error-severity violations outside the baseline, or `mode` is `warn` or `off` |
+| 1 | `mode` is `enforce` and there is at least one error-severity violation that isn't in the baseline |
+| 2 | The check could not run: no policy file, an invalid policy or baseline (every problem is listed), or no Next.js app |
 
-The policy file fails closed: an unknown key, a misspelled rule name, or a bad value makes the whole policy invalid instead of quietly skipping that rule. Start in `warn` mode, fix or `except` what it reports, then switch to `enforce`.
+The policy file fails closed: an unknown key, a misspelled rule name, or a bad value makes the whole policy invalid instead of quietly skipping that rule.
+
+### Baselines
+
+An existing app usually breaks a new policy in a few places already. A baseline records those, so you can switch to `enforce` right away and fail only on new violations:
+
+```bash
+npm run check -- /path/to/project --update-baseline   # record every current violation in codebase-lens.baseline.json
+npm run check -- /path/to/project --prune-baseline    # remove violations that have been fixed; never adds new ones
+```
+
+Commit `codebase-lens.baseline.json` next to the policy file and protect it with `CODEOWNERS` too, since adding an entry allows a violation. Violations are matched by rule, file, and what they import, not by line number, so unrelated edits don't make known violations look new. A second offending import of the same thing in the same file is still new.
+
+Each report lists new violations in full, known ones in a short list, and baseline entries that no longer occur, so the baseline can shrink as code is fixed. An invalid baseline file stops the check (exit code 2) instead of being ignored; `--update-baseline` regenerates it. Renaming a rule makes its baselined violations new, since the rule name is part of the match.
+
+Rollout: start in `warn` mode to see what the policy reports, fix or `except` what's wrong, record the rest with `--update-baseline`, then switch to `enforce`.
 
 ## Knowledge Resources
 
