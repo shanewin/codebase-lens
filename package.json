@@ -25,7 +25,8 @@
     "start": "node dist/server.js",
     "dev": "tsc --watch",
     "test": "tsc && node --test test/*.test.mjs",
-    "fetch-docs": "npx tsx scripts/fetch-docs.ts"
+    "fetch-docs": "npx tsx scripts/fetch-docs.ts",
+    "snapshot": "tsc && node scripts/snapshot.mjs"
   },
   "keywords": [
     "mcp",

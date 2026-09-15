@@ -229,7 +229,7 @@ export function registerNextjsTools(tools: ToolCollector, appRoot: string): void
 
       const findings: Finding[] = []
       if (mw.matchers === null) findings.push({ severity: 'low', detail: 'No matcher — runs on every request including static assets and images', file: mw.file })
-      if (!mw.hasAuthLogic) findings.push({ severity: 'info', detail: 'No recognizable auth logic in middleware', file: mw.file })
+      if (!mw.hasAuthLogic) findings.push({ severity: 'info', detail: `No recognizable auth logic in ${mw.kind}`, file: mw.file })
       // Next.js 16: middleware is deprecated in favor of proxy, but proxy only runs on Node.js and rejects a runtime option.
       // Middleware without runtime: 'nodejs' runs on the Edge runtime, so renaming it changes where it runs.
       if (major !== null && major >= 16) {
@@ -248,7 +248,7 @@ export function registerNextjsTools(tools: ToolCollector, appRoot: string): void
       }
       const skippedRoutes = skipped.filter(r => r.type === 'route')
       if (mw.hasAuthLogic && skippedRoutes.length) {
-        const summary = 'Route handlers not matched by middleware (need their own auth)'
+        const summary = `Route handlers not matched by ${mw.kind} (need their own auth)`
       const handlerPaths = skippedRoutes.map(r => r.path)
       findings.push({ severity: 'info', detail: `${summary}: ${handlerPaths.join(', ')}`, summary, routes: handlerPaths })
       }

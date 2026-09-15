@@ -6,3 +6,6 @@ dist/
 
 # Test fixtures deliberately contain env files
 !test/fixtures/**/.env*
+
+# Local real-app snapshots (npm run snapshot)
+.lens-snapshots/

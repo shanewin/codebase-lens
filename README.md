@@ -184,6 +184,15 @@ npm test   # compiles, then runs node --test against the fixture apps in test/fi
 
 `test/fixtures/app` (a single Next.js app) and `test/fixtures/mono` (a workspace monorepo) contain planted issues. The tests assert what each tool must find there and what it must not flag. CI runs the suite on Node 20 and 22.
 
+Fixtures only cover the cases someone thought of, so also check a large real app before a release:
+
+```bash
+npm run snapshot -- /path/to/a/real/nextjs/app            # first run saves a snapshot; later runs print what changed
+npm run snapshot -- /path/to/a/real/nextjs/app --update   # accept the current results
+```
+
+The report lists endpoint auth status flips, added and removed findings, changed counts, and tools that got much slower. It exits with 1 when anything changed. Snapshots are saved in `.lens-snapshots/` (gitignored), since they depend on your local checkout.
+
 ## License
 
 MIT
