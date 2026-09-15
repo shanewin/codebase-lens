@@ -206,7 +206,7 @@ export function registerNextjsTools(tools: ToolCollector, appRoot: string): void
     description:
       'Analyze middleware.ts / proxy.ts via the AST: parsed matcher config (string, array, or { source } objects), auth logic, ' +
       'redirect/rewrite usage, and — by evaluating each matcher against the real App Router route list — exactly which pages and ' +
-      'route handlers the middleware runs on and which it skips.',
+      'route handlers the middleware runs on and which it skips. On Next.js 16, gives middleware-to-proxy migration advice that accounts for the Edge runtime.',
     parameters: { type: 'object', properties: {}, required: [] },
     execute: async () => {
       const mw = readMiddleware(root, new Set(['auth', 'getToken', 'getSession', 'getUser', 'verifySession', 'jwtVerify', 'verify']))
@@ -230,8 +230,21 @@ export function registerNextjsTools(tools: ToolCollector, appRoot: string): void
       const findings: Finding[] = []
       if (mw.matchers === null) findings.push({ severity: 'low', detail: 'No matcher — runs on every request including static assets and images', file: mw.file })
       if (!mw.hasAuthLogic) findings.push({ severity: 'info', detail: 'No recognizable auth logic in middleware', file: mw.file })
-      if (mw.kind === 'middleware' && major !== null && major >= 16) {
-        findings.push({ severity: 'low', detail: 'Next.js 16 renamed middleware to proxy — rename the file to proxy.ts and the export to proxy', file: mw.file })
+      // Next.js 16: middleware is deprecated in favor of proxy, but proxy only runs on Node.js and rejects a runtime option.
+      // Middleware without runtime: 'nodejs' runs on the Edge runtime, so renaming it changes where it runs.
+      if (major !== null && major >= 16) {
+        const onEdge = mw.runtime === null || /edge/.test(mw.runtime)
+        if (mw.kind === 'middleware' && !onEdge) {
+          findings.push({ severity: 'low', detail: 'Next.js 16 renamed middleware to proxy — rename the file to proxy.ts, the export to proxy, and remove the runtime option (proxy always runs on Node.js and rejects it)', file: mw.file })
+        } else if (mw.kind === 'middleware') {
+          findings.push({
+            severity: 'info',
+            detail: `middleware is deprecated in Next.js 16, but this file runs on the Edge runtime (${mw.runtime ? `runtime: '${mw.runtime}'` : 'the middleware default'}) and proxy only supports Node.js — rename to proxy.ts only if Node.js is acceptable, otherwise keep middleware for now`,
+            file: mw.file,
+          })
+        } else if (mw.runtime !== null) {
+          findings.push({ severity: 'high', detail: `proxy files can't set a runtime — Next.js throws on runtime: '${mw.runtime}'; remove it (proxy always runs on Node.js)`, file: mw.file })
+        }
       }
       const skippedRoutes = skipped.filter(r => r.type === 'route')
       if (mw.hasAuthLogic && skippedRoutes.length) {

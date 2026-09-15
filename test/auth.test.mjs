@@ -1,6 +1,27 @@
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
+import { registerNextjsTools } from '../dist/stacks/nextjs.js'
 import { APP, SITE, runTool } from './helpers.mjs'
+
+/** A throwaway Next.js 16 app with the given files, for middleware/proxy variants. */
+function tempApp(files) {
+  const dir = mkdtempSync(join(tmpdir(), 'lens-proxy-'))
+  const all = { 'package.json': JSON.stringify({ dependencies: { next: '16.0.0' } }), 'app/page.tsx': 'export default function Page() { return null }', ...files }
+  for (const [path, content] of Object.entries(all)) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true })
+    writeFileSync(join(dir, path), content)
+  }
+  return dir
+}
+
+async function middlewareFindings(dir) {
+  const tools = []
+  registerNextjsTools({ register: t => tools.push(t) }, dir)
+  return (await tools.find(t => t.name === 'analyze_middleware').execute({})).findings
+}
 
 describe('audit_route_auth', () => {
   it('classifies every endpoint', async () => {
@@ -92,6 +113,26 @@ describe('analyze_middleware', () => {
     const result = await runTool(APP, 'analyze_middleware')
     assert.equal(result.has_auth_logic, true)
     assert.ok(result.runs_on.includes('page /dashboard'))
+  })
+
+  it('does not tell Edge middleware to become proxy on Next.js 16', async () => {
+    // The app fixture's middleware sets no runtime, so it runs on the Edge runtime
+    const { findings } = await runTool(APP, 'analyze_middleware')
+    const advice = findings.find(f => f.detail.includes('proxy'))
+    assert.equal(advice.severity, 'info')
+    assert.match(advice.detail, /runs on the Edge runtime \(the middleware default\)/)
+  })
+
+  it('tells Node.js middleware to rename to proxy on Next.js 16', async () => {
+    const dir = tempApp({ 'middleware.ts': "export function middleware() {}\nexport const config = { runtime: 'nodejs', matcher: ['/x'] }" })
+    const advice = (await middlewareFindings(dir)).find(f => f.detail.startsWith('Next.js 16 renamed middleware to proxy'))
+    assert.equal(advice.severity, 'low')
+    assert.match(advice.detail, /remove the runtime option/)
+  })
+
+  it('flags a runtime option in a proxy file', async () => {
+    const dir = tempApp({ 'proxy.ts': "export function proxy() {}\nexport const config = { runtime: 'edge' }" })
+    assert.ok((await middlewareFindings(dir)).some(f => f.severity === 'high' && f.detail.startsWith("proxy files can't set a runtime")))
   })
 
   it('does not count a return-to cookie redirect as auth', async () => {

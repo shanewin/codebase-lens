@@ -97,8 +97,8 @@ Results are compact by default so they fit comfortably in Claude's context on la
 |------|-------------|
 | `list_routes` | Flat list of App Router + Pages Router routes with HTTP methods |
 | `find_server_actions` | Every server action (module-level and inline `'use server'`) with auth checks, input validation, and importers. Unauthenticated actions are graded: destroying data is critical, exporting data is high, cache-only revalidation is low |
-| `analyze_middleware` | Parsed matcher config, auth logic, and exactly which routes middleware/proxy runs on and which it skips |
-| `analyze_data_fetching` | Per-route segment config, `fetch` cache options, `'use cache'`, `cacheLife`/`cacheTag`, dynamic APIs (followed into imported data helpers, with the file each came from), and the inferred rendering mode |
+| `analyze_middleware` | Parsed matcher config, auth logic, and exactly which routes middleware/proxy runs on and which it skips. On Next.js 16, migration advice that accounts for the Edge runtime (proxy only runs on Node.js) |
+| `analyze_data_fetching` | Per-route segment config, `fetch` cache options, `'use cache'`, `cacheLife`/`cacheTag`, dynamic APIs (followed into imported data helpers, with the file each came from), and the inferred rendering mode. On Next.js 16, flags the deprecated single-argument `revalidateTag` |
 | `audit_next_config` | Statically evaluates next.config (unwrapping plugin wrappers) and flags secrets in `env`, wildcard image hosts, ignored build errors, source maps, and missing security headers |
 | `audit_env_files` | Secret-looking `NEXT_PUBLIC_` vars, env files not covered by .gitignore (high when they contain secrets), `.env.example` templates and monorepo-root env files, and public vars used in code but defined nowhere |
 

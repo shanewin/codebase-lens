@@ -1,6 +1,6 @@
 'use server'
 
-import { revalidatePath } from 'next/cache'
+import { revalidatePath, revalidateTag } from 'next/cache'
 import { db } from '@/lib/db'
 
 const prisma = { user: { deleteMany: async () => {}, findMany: async () => [] as unknown[] } }
@@ -19,6 +19,8 @@ export async function unsubscribeEmail(formData: FormData) {
 // Only revalidates cache, no auth → low
 export async function refreshDashboard() {
   revalidatePath('/dashboard')
+  revalidateTag('dashboard') // deprecated single-argument form on Next.js 16
+  revalidateTag('stats', 'max')
 }
 
 // Hands data back to the caller, no auth → high

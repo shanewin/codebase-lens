@@ -266,6 +266,8 @@ export interface MiddlewareInfo {
   file: string
   kind: 'middleware' | 'proxy'
   matchers: string[] | null   // null = runs on every route
+  /** `config.runtime` or `export const runtime`, when set to a string */
+  runtime: string | null
   hasAuthLogic: boolean
   signals: AuthSignal[]
 }
@@ -307,8 +309,13 @@ export function readMiddleware(root: string, authCalls: Set<string>): Middleware
           const prop = config.init.properties.find(pr => ts.isPropertyAssignment(pr) && pr.name.getText(sf) === 'matcher') as ts.PropertyAssignment | undefined
           if (prop) matchers = matcherStrings(prop.initializer)
         }
+        const runtimeProp = config?.init && ts.isObjectLiteralExpression(config.init)
+          ? config.init.properties.find(pr => ts.isPropertyAssignment(pr) && pr.name.getText(sf) === 'runtime') as ts.PropertyAssignment | undefined
+          : undefined
+        const runtimeExpr = runtimeProp?.initializer ?? getExports(sf).find(e => e.name === 'runtime' && e.init)?.init
+        const runtime = runtimeExpr && ts.isStringLiteralLike(runtimeExpr) ? runtimeExpr.text : null
         const signals = findAuthSignals(sf, sf, authCalls, 0, helperContext(root, p, createResolver(root)))
-        return { file: relative(root, p), kind: base as 'middleware' | 'proxy', matchers, hasAuthLogic: signals.length > 0 || sessionCookieGate(sf), signals }
+        return { file: relative(root, p), kind: base as 'middleware' | 'proxy', matchers, runtime, hasAuthLogic: signals.length > 0 || sessionCookieGate(sf), signals }
       }
     }
   }

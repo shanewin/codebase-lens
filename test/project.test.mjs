@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, it } from 'node:test'
+import { registerNextjsTools } from '../dist/stacks/nextjs.js'
 import { APP, SITE, runTool } from './helpers.mjs'
 
 describe('find_unused_exports', () => {
@@ -52,6 +56,27 @@ describe('analyze_data_fetching', () => {
     assert.equal(page.rendering, 'static (forced)')
     assert.deepEqual(page.dynamic_apis, ['cookies() via src/lib/session.ts'])
     assert.deepEqual(findings.filter(f => f.file === page.file).map(f => f.severity), ['medium'])
+  })
+
+  it('flags the deprecated single-argument revalidateTag on Next.js 16', async () => {
+    const { findings } = await runTool(APP, 'analyze_data_fetching')
+    const deprecated = findings.filter(f => f.detail.includes('deprecated single-argument form'))
+    assert.equal(deprecated.length, 1, "revalidateTag('stats', 'max') must not be flagged")
+    assert.match(deprecated[0].detail, /^revalidateTag\('dashboard'\)/)
+    assert.match(deprecated[0].file, /^src\/app\/admin-actions\.ts:\d+$/)
+    assert.equal(deprecated[0].severity, 'low')
+  })
+
+  it('does not flag single-argument revalidateTag before Next.js 16', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lens-next15-cache-'))
+    mkdirSync(join(dir, 'app'), { recursive: true })
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ dependencies: { next: '^15.3.0' } }))
+    writeFileSync(join(dir, 'app', 'page.tsx'), 'export default function Page() { return null }')
+    writeFileSync(join(dir, 'app', 'actions.ts'), "'use server'\nimport { revalidateTag } from 'next/cache'\nexport async function refresh() { revalidateTag('posts') }\n")
+    const tools = []
+    registerNextjsTools({ register: t => tools.push(t) }, dir)
+    const { findings } = await tools.find(t => t.name === 'analyze_data_fetching').execute({})
+    assert.ok(!findings.some(f => f.detail.includes('deprecated single-argument form')))
   })
 
   it('reads route segment config', async () => {

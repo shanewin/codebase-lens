@@ -2,7 +2,7 @@ import { join, relative } from 'node:path'
 import ts from 'typescript'
 import type { ToolCollector } from '../../core/types.js'
 import {
-  bodyDirectives, createResolver, fileDirective, getExports, getImports, lineOf, literalExport, nextMajorVersion, parseFile, type Resolver,
+  bodyDirectives, createResolver, fileDirective, getExports, getImports, lineOf, literalExport, nextMajorVersion, parseFile, projectSourceFiles, type Resolver,
 } from './ast.js'
 import { buildAppTree, resolveAppRoutes, type Finding } from './routes.js'
 
@@ -230,7 +230,8 @@ export function registerDataFetchingTools(tools: ToolCollector, root: string, ap
       'unstable_cache, React cache(), and dynamic API usage (cookies, headers, draftMode, connection, searchParams) — with an inferred ' +
       `rendering mode. Follows the functions each route actually calls into imported helpers, up to ${MAX_IMPORT_DEPTH} modules deep ` +
       '(through re-exports, stopping at \'use client\' and \'use server\' modules). Dynamic APIs reached through those calls are definite ' +
-      '(dynamic_apis); ones in helpers the route only imports are possible (possible_dynamic_apis) and never raise severity.',
+      '(dynamic_apis); ones in helpers the route only imports are possible (possible_dynamic_apis) and never raise severity. ' +
+      'On Next.js 16, also flags the deprecated single-argument revalidateTag(tag) anywhere in the app.',
     parameters: {
       type: 'object',
       properties: { path: { type: 'string', description: 'Only include routes under this URL prefix (optional)' } },
@@ -385,6 +386,34 @@ export function registerDataFetchingTools(tools: ToolCollector, root: string, ap
           findings.push({ severity: 'info', detail: 'fetch() without cache options is uncached by default since Next.js 15', file: r.file, route: r.path })
         }
       }
+      // Next.js 16 deprecates revalidateTag(tag) without a cacheLife profile: a TypeScript error that expires the tag immediately
+      if (major !== null && major >= 16) {
+        for (const file of projectSourceFiles(root)) {
+          const sf = parseFile(file)
+          if (!sf || !sf.text.includes('revalidateTag')) continue
+          const locals = new Set<string>()
+          for (const s of sf.statements) {
+            if (!ts.isImportDeclaration(s) || !ts.isStringLiteral(s.moduleSpecifier) || s.moduleSpecifier.text !== 'next/cache') continue
+            const nb = s.importClause?.namedBindings
+            if (nb && ts.isNamedImports(nb)) {
+              for (const el of nb.elements) if ((el.propertyName ?? el.name).text === 'revalidateTag') locals.add(el.name.text)
+            }
+          }
+          if (!locals.size) continue
+          const visit = (n: ts.Node): void => {
+            if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && locals.has(n.expression.text) && n.arguments.length === 1) {
+              findings.push({
+                severity: 'low',
+                detail: `${n.getText(sf).slice(0, 80)} uses the deprecated single-argument form — on Next.js 16 it expires the tag immediately (like { expire: 0 }) and is a TypeScript error; pass a cacheLife profile such as 'max', or use updateTag in a Server Action`,
+                file: `${relative(root, file)}:${lineOf(sf, n)}`,
+              })
+            }
+            ts.forEachChild(n, visit)
+          }
+          visit(sf)
+        }
+      }
+
       return { count: results.length, files: results, findings }
     },
   })
