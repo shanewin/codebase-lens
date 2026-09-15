@@ -20,14 +20,3 @@ export interface ToolRegistration {
 export interface ToolCollector {
   register(tool: ToolRegistration): void
 }
-
-export interface StackAdapter {
-  name: string
-  detect(root: string): boolean
-  register(tools: ToolCollector, root: string): void
-}
-
-export interface DetectedStack {
-  name: string
-  adapter: StackAdapter
-}

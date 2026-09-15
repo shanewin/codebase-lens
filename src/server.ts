@@ -4,11 +4,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join, resolve, relative } from 'node:path'
 
 import type { ToolRegistration, PropertySchema, ToolCollector } from './core/types.js'
-import { detectStacks, describeDetection } from './core/detect.js'
-import { findNextApps, isNextApp } from './core/workspace.js'
+import { resolveNextApp } from './core/workspace.js'
+import { registerNextjsTools } from './stacks/nextjs.js'
 import { registerFileTools } from './scanners/files.js'
 import { registerImportTools } from './scanners/imports.js'
 import { registerStyleTools } from './scanners/styles.js'
@@ -186,37 +186,17 @@ registerFileTools(collector, root)
 registerImportTools(collector, root)
 registerStyleTools(collector, root)
 
-// 2. Auto-detect Next.js — at PROJECT_PATH itself, or inside a monorepo's workspaces
-let appRoot = root
-let detected = detectStacks(root)
-let workspaceNote = ''
-
-if (detected.length === 0) {
-  const apps = findNextApps(root)
-  const override = process.env.CODEBASE_LENS_APP
-  let chosen = apps[0]
-  if (override) {
-    const overridePath = resolve(root, override)
-    chosen = apps.find(a => a.path === overridePath)
-      ?? (isNextApp(overridePath) ? { path: overridePath, relPath: override, routeFiles: 0 } : undefined)
-    if (!chosen) workspaceNote = `CODEBASE_LENS_APP="${override}" is not a Next.js app. `
-  }
-  if (chosen) {
-    appRoot = chosen.path
-    detected = detectStacks(appRoot)
-    const others = apps.filter(a => a !== chosen).map(a => `${a.relPath} (${a.routeFiles} route files)`)
-    workspaceNote +=
-      `Monorepo: analyzing Next.js app at ${chosen.relPath}${override ? ' (CODEBASE_LENS_APP)' : ` — the app with the most routes (${chosen.routeFiles} route files)`}. ` +
-      (others.length ? `Other Next.js apps: ${others.join(', ')}. Set CODEBASE_LENS_APP to one of these to analyze it instead. ` : '') +
-      'Next.js tool file paths are relative to that app directory.'
-  }
+// 2. Locate the Next.js app (PROJECT_PATH, CODEBASE_LENS_APP, or a monorepo's main app) and register its tools
+const resolution = resolveNextApp(root, process.env.CODEBASE_LENS_APP)
+// `in` narrowing works without strictNullChecks (tsconfig has strict: false); `!resolution.ok` does not
+if ('error' in resolution) {
+  console.error(`ERROR: ${resolution.error}`)
+  process.exit(1)
 }
+const appRoot = resolution.appRoot
+registerNextjsTools(collector, appRoot)
 
-for (const stack of detected) {
-  stack.adapter.register(collector, appRoot)
-}
-
-const detectionSummary = [describeDetection(detected), workspaceNote].filter(Boolean).join('\n\n')
+const detectionSummary = [`Next.js app: ${appRoot}`, resolution.note].filter(Boolean).join('\n\n')
 
 // ---------------------------------------------------------------------------
 // Create MCP server
@@ -273,42 +253,31 @@ server.resource(
 // ---------------------------------------------------------------------------
 // Register knowledge files as MCP resources
 // ---------------------------------------------------------------------------
-// Knowledge files live in knowledge/{stack}/ and come in two flavors:
+// Knowledge files live in knowledge/nextjs/ and come in two flavors:
 //   - docs.md    — auto-fetched from official docs (run scripts/fetch-docs.ts)
 //   - community.md — human-maintained best practices and gotchas
-// Only load knowledge for detected stacks.
 
-const knowledgeDir = join(import.meta.dirname, '..', 'knowledge')
+const knowledgeDir = join(import.meta.dirname, '..', 'knowledge', 'nextjs')
+const knowledgeFiles = existsSync(knowledgeDir) ? readdirSync(knowledgeDir).filter(f => f.endsWith('.md')) : []
 
-for (const stack of detected) {
-  const stackKnowledgeDir = join(knowledgeDir, stack.name)
-  if (!existsSync(stackKnowledgeDir)) continue
+for (const file of knowledgeFiles) {
+  const filePath = join(knowledgeDir, file)
 
-  let knowledgeFiles: string[]
-  try {
-    knowledgeFiles = readdirSync(stackKnowledgeDir).filter(f => f.endsWith('.md'))
-  } catch { continue }
-
-  for (const file of knowledgeFiles) {
-    const resourceName = `knowledge:${stack.name}:${file.replace('.md', '')}`
-    const filePath = join(stackKnowledgeDir, file)
-
-    server.resource(
-      resourceName,
-      `lens://knowledge/${stack.name}/${file}`,
-      { mimeType: 'text/markdown' },
-      async (uri) => {
-        const text = readFileSync(filePath, 'utf-8')
-        return {
-          contents: [{
-            uri: uri.href,
-            mimeType: 'text/markdown',
-            text,
-          }],
-        }
-      },
-    )
-  }
+  server.resource(
+    `knowledge:nextjs:${file.replace('.md', '')}`,
+    `lens://knowledge/nextjs/${file}`,
+    { mimeType: 'text/markdown' },
+    async (uri) => {
+      const text = readFileSync(filePath, 'utf-8')
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: 'text/markdown',
+          text,
+        }],
+      }
+    },
+  )
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { readFileSafe, walkFiles } from './helpers.js'
 
 export interface NextAppCandidate {
@@ -132,6 +132,55 @@ export function findWorkspace(startDir: string): Workspace | null {
   }
   workspaceCache.set(startDir, result)
   return result
+}
+
+// ---------------------------------------------------------------------------
+// App resolution
+// ---------------------------------------------------------------------------
+
+export type NextAppResolution =
+  | { ok: true; appRoot: string; note: string | null }
+  | { ok: false; error: string }
+
+/**
+ * Decide which Next.js app to analyze: the CODEBASE_LENS_APP override if given, else PROJECT_PATH itself,
+ * else (in a monorepo) the workspace app with the most routes.
+ */
+export function resolveNextApp(root: string, override?: string): NextAppResolution {
+  if (override) {
+    const overridePath = resolve(root, override)
+    if (!isNextApp(overridePath)) {
+      const found = findNextApps(root)
+      return {
+        ok: false,
+        error: `CODEBASE_LENS_APP="${override}" is not a Next.js app (no next.config.* and no "next" dependency).` +
+          (found.length ? ` Next.js apps found: ${found.map(a => a.relPath).join(', ')}.` : ''),
+      }
+    }
+    return {
+      ok: true,
+      appRoot: overridePath,
+      note: overridePath === root ? null : `Analyzing Next.js app at ${relative(root, overridePath)} (CODEBASE_LENS_APP). Tool file paths are relative to that directory.`,
+    }
+  }
+
+  if (isNextApp(root)) return { ok: true, appRoot: root, note: null }
+
+  const [chosen, ...others] = findNextApps(root)
+  if (!chosen) {
+    return {
+      ok: false,
+      error: `No Next.js app found at ${root} or in its workspaces. Set PROJECT_PATH to a Next.js app (a directory with next.config.* or "next" in package.json), or to the root of a monorepo that contains one.`,
+    }
+  }
+  return {
+    ok: true,
+    appRoot: chosen.path,
+    note:
+      `Monorepo: analyzing Next.js app at ${chosen.relPath}, the app with the most routes (${chosen.routeFiles} route files). ` +
+      (others.length ? `Other Next.js apps: ${others.map(a => `${a.relPath} (${a.routeFiles} route files)`).join(', ')}. Set CODEBASE_LENS_APP to analyze one of these instead. ` : '') +
+      'Tool file paths are relative to that app directory.',
+  }
 }
 
 /** Next.js apps inside a monorepo, most routes first. */

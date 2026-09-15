@@ -23,7 +23,7 @@ Haiku with codebase-lens outperformed Opus without it — at one-fifth the cost,
 Your Next.js project
     ↓ PROJECT_PATH
 codebase-lens (MCP server over stdio)
-    ├── Next.js tools (AST-based, loaded when Next.js is detected)
+    ├── Next.js tools (AST-based; PROJECT_PATH must be a Next.js app or a monorepo containing one)
     ├── Generic scanners (files, search, imports, styles)
     └── Knowledge resources (official docs + community gotchas)
 ```
@@ -117,11 +117,11 @@ Two Markdown files are exposed as MCP resources that Claude can read:
 
 ```
 src/
-├── server.ts              # MCP entry point, detection, tool registration
+├── server.ts              # MCP entry point, app resolution, tool registration
 ├── core/
-│   ├── types.ts           # ToolRegistration, StackAdapter interfaces
+│   ├── types.ts           # ToolRegistration, ToolCollector interfaces
 │   ├── helpers.ts         # safePath, walkFiles, file utilities
-│   └── detect.ts          # Next.js detection
+│   └── workspace.ts       # Finds the Next.js app (PROJECT_PATH, CODEBASE_LENS_APP, or monorepo workspaces)
 ├── scanners/              # Generic tools
 │   ├── files.ts           # File listing, reading, searching
 │   ├── imports.ts         # Import/dependency tracing
