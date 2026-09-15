@@ -209,6 +209,55 @@ Each report lists new violations in full, known ones in a short list, and baseli
 
 Rollout: start in `warn` mode to see what the policy reports, fix or `except` what's wrong, record the rest with `--update-baseline`, then switch to `enforce`.
 
+### Inline exceptions
+
+To allow one specific violation, say why in a comment on the line above the import, or at the end of the import's first line:
+
+```ts
+// lens-allow client-bundle: only imports an error message constant, no server code
+import { INVALID_TOKEN_ERROR } from '@acme/lib/server/turnstile'
+
+import { db } from '@/server/db' // lens-allow "No server code in routes": removed in #1234
+```
+
+Name the rule by type (`forbidden-imports`, `client-bundle`) or by its `name` in quotes. Other `//` comment lines may sit between the exception and the import.
+
+- The reason is required. A comment without one doesn't apply, and the report says so.
+- Every applied exception is listed in the report with its reason, so reviewers see them.
+- Comments that no longer match a violation are listed as unused, so they don't pile up.
+- Allowed violations are never written to the baseline. Removing the comment makes the violation fail again.
+
+Use exceptions for decisions about a single import, and `except` in the policy for whole groups of files.
+
+### Pull request annotations (SARIF)
+
+`--sarif <file>` also writes the violations that count (not baselined, not allowed by an exception) in [SARIF](https://sarifweb.azurewebsites.net/), which GitHub code scanning shows on pull requests at the offending line. Run the check against the repository root so the paths line up.
+
+```yaml
+# .github/workflows/codebase-lens.yml
+name: codebase-lens
+on: [pull_request]
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: git clone --depth 1 https://github.com/shanewin/codebase-lens /tmp/codebase-lens && npm ci --prefix /tmp/codebase-lens && npm run build --prefix /tmp/codebase-lens
+      - run: node /tmp/codebase-lens/scripts/check.mjs . --sarif codebase-lens.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('codebase-lens.sarif') != ''
+        with:
+          sarif_file: codebase-lens.sarif
+```
+
+The check step fails the job in `enforce` mode; the upload runs either way. Code scanning is free for public repositories; private repositories need GitHub Advanced Security. Without it, the check step's log still shows every violation.
+
 ## Knowledge Resources
 
 Markdown knowledge files are exposed as MCP resources that Claude can read:

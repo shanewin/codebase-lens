@@ -3,7 +3,9 @@ import { join, relative } from 'node:path'
 import { findDir } from '../stacks/nextjs/ast.js'
 import { checkClientBundle } from '../stacks/nextjs/clientBundle.js'
 import { checkForbiddenImports, type PolicyViolation } from '../stacks/nextjs/forbidden.js'
+import { projectGraph } from '../stacks/nextjs/graph.js'
 import { baselinePathFor, baselineSize, loadBaseline, matchBaseline, toBaseline, writeBaseline, type BaselineEntry } from './baseline.js'
+import { applyExceptions, type ExceptionSummary } from './exceptions.js'
 import { loadPolicy, POLICY_FILE, type PolicyMode } from './policy.js'
 import { resolveNextApp } from './workspace.js'
 
@@ -16,6 +18,11 @@ export interface CheckViolation extends PolicyViolation {
   path: string
   /** Already recorded in the baseline, so it never fails the check */
   baselined: boolean
+  /** Allowed by a `// lens-allow` comment with a reason */
+  excepted: boolean
+  exception_reason?: string
+  /** Why a lens-allow comment at this import didn't apply */
+  exception_problem?: string
 }
 
 /** What to do with the baseline: compare against it, record every current violation, or drop only fixed entries */
@@ -62,19 +69,23 @@ export interface CheckResult {
   scanned_files: number
   /** Files in the client bundle (only computed when there are client-bundle rules) */
   client_bundle_files: number
-  /** Error-severity violations not in the baseline */
+  /** Error-severity violations that count: not baselined, not allowed by an exception */
   errors: number
-  /** Warn-severity violations not in the baseline */
+  /** Warn-severity violations that count */
   warnings: number
-  /** Enforce mode with at least one error-severity violation that isn't baselined */
+  /** Enforce mode with at least one error-severity violation that counts */
   failed: boolean
   baseline: BaselineSummary
-  /** Every violation, baselined or not */
+  exceptions: ExceptionSummary
+  /** Every violation, including baselined and excepted ones */
   violations: CheckViolation[]
   caveats: string[]
 }
 
 export type CheckReport = CheckFailure | CheckResult
+
+const byLocation = (a: { path: string; line: number; rule: string }, b: { path: string; line: number; rule: string }) =>
+  a.path.localeCompare(b.path) || a.line - b.line || a.rule.localeCompare(b.rule)
 
 /** Load the policy for a project (project root first, then the app directory) and check the app against it. */
 export function runPolicyCheck(projectPath: string, options: CheckOptions = {}): CheckReport {
@@ -100,6 +111,7 @@ export function runPolicyCheck(projectPath: string, options: CheckOptions = {}):
 
   const baselinePath = baselinePathFor(loaded.path)
   const baselineFile = relative(projectPath, baselinePath)
+  const toPath = (appRelative: string) => relative(projectPath, join(appRoot, appRelative))
   const base = {
     ok: true as const,
     project: projectPath,
@@ -112,6 +124,7 @@ export function runPolicyCheck(projectPath: string, options: CheckOptions = {}):
     return {
       ...base, skipped: true, scanned_files: 0, client_bundle_files: 0, errors: 0, warnings: 0, failed: false, violations: [], caveats: [],
       baseline: { file: baselineFile, exists: existsSync(baselinePath), size: 0, baselined: 0, fixed: [], written: null, removed: 0 },
+      exceptions: { applied: [], invalid: [], unused: [] },
     }
   }
 
@@ -126,12 +139,14 @@ export function runPolicyCheck(projectPath: string, options: CheckOptions = {}):
 
   const forbidden = checkForbiddenImports(appRoot, policy.forbiddenImports)
   const bundle = appDir ? checkClientBundle(appRoot, appDir, policy.clientBundle) : { client_files: 0, violations: [], caveats: [] }
-  const found = [...forbidden.violations, ...bundle.violations]
-    .map(v => ({ ...v, path: relative(projectPath, join(appRoot, v.file)) }))
-    .sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line || a.rule.localeCompare(b.rule))
+  const found = [...forbidden.violations, ...bundle.violations].map(v => ({ ...v, path: toPath(v.file) }))
 
-  let baseline = action === 'update' ? toBaseline(found) : stored.baseline
-  const matched = matchBaseline(found, baseline)
+  // Exceptions first: an allowed violation is never recorded in (or matched against) the baseline
+  const excepted = applyExceptions(found, appRoot, projectGraph(appRoot).files, toPath, abs => relative(appRoot, abs))
+  const active = excepted.violations.filter(v => !v.excepted)
+
+  let baseline = action === 'update' ? toBaseline(active) : stored.baseline
+  const matched = matchBaseline(active, baseline)
   let fixed = matched.fixed
   let removed = 0
   if (action === 'update') {
@@ -144,8 +159,11 @@ export function runPolicyCheck(projectPath: string, options: CheckOptions = {}):
     fixed = []
   }
 
-  const violations = matched.violations
-  const counted = violations.filter(v => !v.baselined)
+  const violations: CheckViolation[] = [
+    ...matched.violations,
+    ...excepted.violations.filter(v => v.excepted).map(v => ({ ...v, baselined: false })),
+  ].sort(byLocation)
+  const counted = violations.filter(v => !v.baselined && !v.excepted)
   const errors = counted.filter(v => v.severity === 'error').length
   return {
     ...base,
@@ -159,17 +177,18 @@ export function runPolicyCheck(projectPath: string, options: CheckOptions = {}):
       file: baselineFile,
       exists: !!baseline,
       size: baselineSize(baseline),
-      baselined: violations.length - counted.length,
-      fixed: fixed.map(e => ({ ...e, path: relative(projectPath, join(appRoot, e.file)) })),
+      baselined: violations.filter(v => v.baselined).length,
+      fixed: fixed.map(e => ({ ...e, path: toPath(e.file) })),
       written: action === 'check' ? null : action === 'update' ? 'updated' : 'pruned',
       removed,
     },
+    exceptions: excepted.summary,
     violations,
     caveats: [...(policy.forbiddenImports.length ? forbidden.caveats : []), ...bundle.caveats],
   }
 }
 
-/** 0 = passed (or warn/off mode), 1 = enforce mode found errors not in the baseline, 2 = could not run */
+/** 0 = passed (or warn/off mode), 1 = enforce mode found errors that count, 2 = could not run */
 export function exitCode(report: CheckReport): 0 | 1 | 2 {
   if (!report.ok) return 2
   return report.failed ? 1 : 0
@@ -178,6 +197,13 @@ export function exitCode(report: CheckReport): 0 | 1 | 2 {
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 const CHAINS_SHOWN = 3
 const LIST_SHOWN = 20
+
+function pushList<T>(lines: string[], title: string, items: T[], line: (item: T) => string): void {
+  if (!items.length) return
+  lines.push('', title)
+  for (const item of items.slice(0, LIST_SHOWN)) lines.push(`  ${line(item)}`)
+  if (items.length > LIST_SHOWN) lines.push(`  … ${items.length - LIST_SHOWN} more (see --json)`)
+}
 
 /** Human-readable report for terminals and CI logs. */
 export function formatReport(report: CheckReport): string {
@@ -197,7 +223,7 @@ export function formatReport(report: CheckReport): string {
 
   let current: string | null = null
   for (const v of report.violations) {
-    if (v.baselined) continue
+    if (v.baselined || v.excepted) continue
     if (v.path !== current) {
       current = v.path
       lines.push('', v.path)
@@ -206,19 +232,23 @@ export function formatReport(report: CheckReport): string {
     for (const chain of (v.chains ?? []).slice(0, CHAINS_SHOWN)) lines.push(`      chain: ${chain.join(' → ')}`)
     if ((v.chains?.length ?? 0) > CHAINS_SHOWN) lines.push(`      … ${plural(v.chains!.length - CHAINS_SHOWN, 'more chain')}`)
     if (v.message) lines.push(`      fix: ${v.message}`)
+    if (v.exception_problem) lines.push(`      note: ${v.exception_problem}`)
   }
 
+  const e = report.exceptions
+  pushList(lines, `Allowed by inline exceptions: ${report.violations.filter(v => v.excepted).length}`, e.applied,
+    x => `${x.path}:${x.line}  ${x.rule}: ${x.reason}`)
+  pushList(lines, 'Exceptions that do not apply:', e.invalid, x => `${x.path}:${x.line}  ${x.problem}`)
+  pushList(lines, 'Unused exceptions (no violation to allow; remove them):', e.unused, x => `${x.path}:${x.line}  ${x.rule}`)
+
   const baselined = report.violations.filter(v => v.baselined)
-  if (baselined.length && b.written !== 'updated') {
-    lines.push('', `In the baseline (known, not failing): ${baselined.length}`)
-    for (const v of baselined.slice(0, LIST_SHOWN)) lines.push(`  ${v.path}:${v.line}  ${v.rule}`)
-    if (baselined.length > LIST_SHOWN) lines.push(`  … ${baselined.length - LIST_SHOWN} more (see --json)`)
+  if (b.written !== 'updated') {
+    pushList(lines, `In the baseline (known, not failing): ${baselined.length}`, baselined, v => `${v.path}:${v.line}  ${v.rule}`)
   }
   if (b.fixed.length) {
-    const total = b.fixed.reduce((n, e) => n + e.count, 0)
-    lines.push('', `Fixed since the baseline: ${total}. Remove them with --prune-baseline:`)
-    for (const e of b.fixed.slice(0, LIST_SHOWN)) lines.push(`  ${e.path}  ${e.rule} → ${e.target}${e.count > 1 ? ` (×${e.count})` : ''}`)
-    if (b.fixed.length > LIST_SHOWN) lines.push(`  … ${b.fixed.length - LIST_SHOWN} more (see --json)`)
+    const total = b.fixed.reduce((n, x) => n + x.count, 0)
+    pushList(lines, `Fixed since the baseline: ${total}. Remove them with --prune-baseline:`, b.fixed,
+      x => `${x.path}  ${x.rule} → ${x.target}${x.count > 1 ? ` (×${x.count})` : ''}`)
   }
 
   const kind = (n: number, word: string) => plural(n, b.exists ? `new ${word}` : word)
