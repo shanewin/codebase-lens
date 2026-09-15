@@ -3,9 +3,10 @@ import { join, relative } from 'node:path'
 import ts from 'typescript'
 import type { ToolCollector } from '../../core/types.js'
 import {
-  bodyDirectives, createResolver, fileDirective, getExports, getImports, lineOf, parseFile, projectSourceFiles,
+  bodyDirectives, fileDirective, getExports, lineOf, parseFile,
   type ExportInfo, type Resolver,
 } from './ast.js'
+import { projectGraph } from './graph.js'
 import { buildAppTree, HTTP_METHODS, resolveAppRoutes, resolvePagesRoutes, type Finding } from './routes.js'
 
 // ---------------------------------------------------------------------------
@@ -76,11 +77,13 @@ export interface HelperContext {
   cache: Map<string, AuthSignal[]>
 }
 
-const helperCaches = new WeakMap<Resolver, Map<string, AuthSignal[]>>()
+// One cache per tool run, keyed by that run's auth-call set (created fresh on every run). The resolver is shared across
+// runs, so keying by it would reuse results computed with different auth_functions or before a helper file changed.
+const helperCaches = new WeakMap<Set<string>, Map<string, AuthSignal[]>>()
 
-export function helperContext(root: string, file: string, resolver: Resolver): HelperContext {
-  if (!helperCaches.has(resolver)) helperCaches.set(resolver, new Map())
-  return { root, file, resolver, cache: helperCaches.get(resolver)! }
+export function helperContext(root: string, file: string, resolver: Resolver, authCalls: Set<string>): HelperContext {
+  if (!helperCaches.has(authCalls)) helperCaches.set(authCalls, new Map())
+  return { root, file, resolver, cache: helperCaches.get(authCalls)! }
 }
 
 /** Auth evidence inside an imported function, e.g. `requirePermission` from '@/lib/permissions'. */
@@ -217,7 +220,7 @@ function handlerSignals(root: string, file: string, sf: ts.SourceFile, exp: Expo
   if (wrap) signals.push(wrap)
   const delegated = delegationSignal(sf, exp.init ?? exp.fn)
   if (delegated) signals.push(delegated)
-  if (exp.fn) signals.push(...findAuthSignals(sf, exp.fn, authCalls, 0, helperContext(root, file, resolver)))
+  if (exp.fn) signals.push(...findAuthSignals(sf, exp.fn, authCalls, 0, helperContext(root, file, resolver, authCalls)))
   if (signals.length || depth >= 3) return signals
 
   const target = exp.from ? { specifier: exp.from, name: exp.originalName ?? exp.name } : importedHandler(sf, exp.init)
@@ -314,7 +317,7 @@ export function readMiddleware(root: string, authCalls: Set<string>): Middleware
           : undefined
         const runtimeExpr = runtimeProp?.initializer ?? getExports(sf).find(e => e.name === 'runtime' && e.init)?.init
         const runtime = runtimeExpr && ts.isStringLiteralLike(runtimeExpr) ? runtimeExpr.text : null
-        const signals = findAuthSignals(sf, sf, authCalls, 0, helperContext(root, p, createResolver(root)))
+        const signals = findAuthSignals(sf, sf, authCalls, 0, helperContext(root, p, projectGraph(root).resolver, authCalls))
         return { file: relative(root, p), kind: base as 'middleware' | 'proxy', matchers, runtime, hasAuthLogic: signals.length > 0 || sessionCookieGate(sf), signals }
       }
     }
@@ -450,7 +453,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
     execute: async (args: { auth_functions?: string }) => {
       const authCalls = authCallSet(args.auth_functions)
       const mw = readMiddleware(root, authCalls)
-      const resolver = createResolver(root)
+      const resolver = projectGraph(root).resolver
       const coveredByMiddleware = (path: string) =>
         !!mw?.hasAuthLogic && (mw.matchers === null || mw.matchers.some(m => matcherMatches(m, path)))
 
@@ -537,8 +540,8 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
     },
     execute: async (args: { auth_functions?: string }) => {
       const authCalls = authCallSet(args.auth_functions)
-      const resolver = createResolver(root)
-      const files = projectSourceFiles(root)
+      const graph = projectGraph(root)
+      const { resolver, files } = graph
 
       const actions: {
         name: string; file: string; line: number; type: 'module' | 'inline'
@@ -565,7 +568,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
             if (exp.typeOnly || !exp.fn) continue
             actions.push({
               name: exp.name, file: rel, line: exp.line, type: 'module',
-              auth: findAuthSignals(sf, exp.fn, authCalls, 0, helperContext(root, file, resolver)), destructive: destructiveEvidence(sf, exp.fn, exp.name),
+              auth: findAuthSignals(sf, exp.fn, authCalls, 0, helperContext(root, file, resolver, authCalls)), destructive: destructiveEvidence(sf, exp.fn, exp.name),
               data_export: dataExportEvidence(exp.name), cache_only: isCacheOnly(exp.fn),
               validates_input: validation(sf, exp.fn), used_by: [],
             })
@@ -577,7 +580,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
               : ts.isVariableDeclaration(n.parent) && ts.isIdentifier(n.parent.name) ? n.parent.name.text : '(anonymous)'
             actions.push({
               name, file: rel, line: lineOf(sf, n), type: 'inline',
-              auth: findAuthSignals(sf, n, authCalls, 0, helperContext(root, file, resolver)), destructive: destructiveEvidence(sf, n, name),
+              auth: findAuthSignals(sf, n, authCalls, 0, helperContext(root, file, resolver, authCalls)), destructive: destructiveEvidence(sf, n, name),
               data_export: dataExportEvidence(name), cache_only: isCacheOnly(n),
               validates_input: validation(sf, n), used_by: [],
             })
@@ -592,11 +595,8 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
       for (const a of actions.filter(a => a.type === 'module')) byFile.set(a.file, [...(byFile.get(a.file) ?? []), a])
       if (byFile.size) {
         for (const file of files) {
-          const sf = parseFile(file)
-          if (!sf) continue
-          for (const imp of getImports(sf)) {
-            const target = resolver.resolve(imp.specifier, file)
-            const acts = target && byFile.get(relative(root, target))
+          for (const imp of graph.importsOf(file)) {
+            const acts = imp.resolved && byFile.get(relative(root, imp.resolved))
             if (!acts) continue
             for (const a of acts) {
               if (imp.names.includes(a.name) || imp.names.includes('*')) a.used_by.push(relative(root, file))

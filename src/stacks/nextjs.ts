@@ -4,7 +4,8 @@ import ts from 'typescript'
 import { walkFiles } from '../core/helpers.js'
 import type { ToolCollector } from '../core/types.js'
 import { findWorkspace } from '../core/workspace.js'
-import { createResolver, findDir, getImports, lineOf, parseFile } from './nextjs/ast.js'
+import { findDir, getImports, lineOf, parseFile } from './nextjs/ast.js'
+import { projectGraph } from './nextjs/graph.js'
 import { readMiddleware, matcherMatches, registerAuthTools } from './nextjs/auth.js'
 import { registerBoundaryTools } from './nextjs/boundaries.js'
 import { buildAppTree, registerRouteTools, resolveAppRoutes, type Finding } from './nextjs/routes.js'
@@ -167,7 +168,7 @@ export function registerNextjsTools(tools: ToolCollector, appRoot: string): void
       // Security headers are often built by helpers (e.g. getCspHeader() in lib/csp), so also search the modules
       // next.config and middleware/proxy import directly.
       const mw = readMiddleware(root, new Set())
-      const resolver = createResolver(root)
+      const resolver = projectGraph(root).resolver
       const headerSources: { file: string; text: string }[] = [{ file: name, text: JSON.stringify(get(config, 'headers') ?? '') }]
       for (const entry of [name, mw?.file].filter((f): f is string => !!f)) {
         const entrySf = parseFile(join(root, entry))

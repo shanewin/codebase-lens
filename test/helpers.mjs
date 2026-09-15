@@ -1,4 +1,6 @@
-import { resolve } from 'node:path'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { registerNextjsTools } from '../dist/stacks/nextjs.js'
 
@@ -18,6 +20,16 @@ export async function runTool(fixtureName, toolName, args = {}) {
   const tool = registered.get(root).find(t => t.name === toolName)
   if (!tool) throw new Error(`Tool ${toolName} is not registered`)
   return tool.execute(args)
+}
+
+/** Write `files` ({ relative path: content }) into a fresh temp directory and return its path. Objects are written as JSON. */
+export function tempProject(files) {
+  const root = mkdtempSync(join(tmpdir(), 'lens-project-'))
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true })
+    writeFileSync(join(root, path), typeof content === 'string' ? content : JSON.stringify(content))
+  }
+  return root
 }
 
 export const APP = 'app'

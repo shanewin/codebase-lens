@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { diffSnapshots, normalize } from '../scripts/snapshot.mjs'
+import { diffSnapshots, normalize } from '../dist/stacks/nextjs/snapshot.js'
 import { APP, runTool } from './helpers.mjs'
 
 const snapshot = tools => ({ created: 'test', tools })

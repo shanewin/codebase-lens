@@ -2,8 +2,9 @@ import { join, relative } from 'node:path'
 import ts from 'typescript'
 import type { ToolCollector } from '../../core/types.js'
 import {
-  bodyDirectives, createResolver, fileDirective, getExports, getImports, lineOf, literalExport, nextMajorVersion, parseFile, projectSourceFiles, type Resolver,
+  bodyDirectives, fileDirective, getExports, getImports, lineOf, literalExport, nextMajorVersion, parseFile, type Resolver,
 } from './ast.js'
+import { projectGraph } from './graph.js'
 import { buildAppTree, resolveAppRoutes, type Finding } from './routes.js'
 
 // How far to follow a route's imports looking for data helpers (route → lib/data.ts → lib/session.ts → …)
@@ -239,7 +240,8 @@ export function registerDataFetchingTools(tools: ToolCollector, root: string, ap
     },
     execute: async (args: { path?: string }) => {
       if (!appDir) return { error: 'No app/ directory found' }
-      const resolver = createResolver(root)
+      const graph = projectGraph(root)
+      const resolver = graph.resolver
       const factsCache = new Map<string, ModuleFacts>()
       const factsFor = (file: string): ModuleFacts => {
         if (!factsCache.has(file)) factsCache.set(file, collectModuleFacts(root, file, resolver))
@@ -388,7 +390,7 @@ export function registerDataFetchingTools(tools: ToolCollector, root: string, ap
       }
       // Next.js 16 deprecates revalidateTag(tag) without a cacheLife profile: a TypeScript error that expires the tag immediately
       if (major !== null && major >= 16) {
-        for (const file of projectSourceFiles(root)) {
+        for (const file of graph.files) {
           const sf = parseFile(file)
           if (!sf || !sf.text.includes('revalidateTag')) continue
           const locals = new Set<string>()

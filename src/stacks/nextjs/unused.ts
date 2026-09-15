@@ -2,7 +2,8 @@ import { relative } from 'node:path'
 import type { ToolCollector } from '../../core/types.js'
 import { readFileSafe, walkFiles } from '../../core/helpers.js'
 import { findWorkspace } from '../../core/workspace.js'
-import { baseName, createResolver, getExports, getImports, parseFile, projectSourceFiles, SOURCE_EXTS, type ExportInfo } from './ast.js'
+import { baseName, getExports, parseFile, SOURCE_EXTS, type ExportInfo } from './ast.js'
+import { projectGraph } from './graph.js'
 import { HTTP_METHODS } from './routes.js'
 
 // Exports Next.js itself consumes, keyed by file base name
@@ -54,8 +55,8 @@ export function registerUnusedTools(tools: ToolCollector, root: string, appDir: 
       required: [],
     },
     execute: async (args: { directory?: string; include_types?: boolean }) => {
-      const resolver = createResolver(root)
-      const files = projectSourceFiles(root)
+      const graph = projectGraph(root)
+      const { resolver, files } = graph
       const exportsByFile = new Map<string, ExportInfo[]>()
       const importers = new Map<string, Set<string>>()
       const used = new Map<string, Set<string>>() // file -> used export names ('*' = everything)
@@ -83,7 +84,7 @@ export function registerUnusedTools(tools: ToolCollector, root: string, appDir: 
             if (name === '*' || !exps.some(x => x.name === name && x.kind !== 'star')) markUsed(target, name, seen)
           } else if (name === '*' || e.name === name) {
             // `export { a as b } from` — find the original name from the import side of the declaration
-            const orig = getImports(sf).find(i => i.specifier === e.from && i.line === e.line)?.names
+            const orig = graph.importsOf(file).find(i => i.specifier === e.from && i.line === e.line)?.names
             const origName = orig && orig.length === 1 ? orig[0] : e.name
             markUsed(target, name === '*' ? '*' : origName, seen)
           }
@@ -113,10 +114,8 @@ export function registerUnusedTools(tools: ToolCollector, root: string, appDir: 
       }
 
       for (const f of [...files, ...externalImporters]) {
-        const sf = parseFile(f)
-        if (!sf) continue
-        for (const imp of getImports(sf)) {
-          const target = resolver.resolve(imp.specifier, f)
+        for (const imp of graph.importsOf(f)) {
+          const target = imp.resolved
           if (!target || target === f) continue
           importers.set(target, (importers.get(target) ?? new Set()).add(f))
           // Re-export declarations are handled by markUsed when the barrel's export is used

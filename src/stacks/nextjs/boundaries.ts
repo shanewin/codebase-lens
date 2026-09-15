@@ -1,7 +1,8 @@
 import { relative } from 'node:path'
 import ts from 'typescript'
 import type { ToolCollector } from '../../core/types.js'
-import { createResolver, fileDirective, getExports, getImports, parseFile } from './ast.js'
+import { fileDirective, getExports, parseFile } from './ast.js'
+import { projectGraph, type ProjectGraph } from './graph.js'
 import { buildAppTree, type Finding, type SegmentNode } from './routes.js'
 
 // Node builtins with no browser fallback. Next.js polyfills process, path, crypto, os, zlib, buffer, stream, util,
@@ -93,11 +94,11 @@ function isModuleScopeGlobalReference(node: ts.Identifier): boolean {
   return true
 }
 
-function collectFacts(file: string, resolve: (spec: string, from: string) => string | null): FileFacts | null {
+function collectFacts(file: string, graph: ProjectGraph): FileFacts | null {
   const sf = parseFile(file)
   if (!sf) return null
-  const imports = getImports(sf).map(i => ({
-    resolved: resolve(i.specifier, file),
+  const imports = graph.importsOf(file).map(i => ({
+    resolved: i.resolved,
     specifier: i.specifier,
     line: i.line,
     typeOnly: i.typeOnly,
@@ -115,7 +116,7 @@ function collectFacts(file: string, resolve: (spec: string, from: string) => str
     ? getExports(sf).filter(e => e.from).map(e => ({
       name: e.kind === 'star' ? '*' : e.name,
       originalName: e.kind === 'star' ? '*' : e.originalName ?? e.name,
-      resolved: resolve(e.from!, file),
+      resolved: graph.resolver.resolve(e.from!, file),
       line: e.line,
       typeOnly: e.typeOnly,
     }))
@@ -204,10 +205,10 @@ export interface BoundaryAnalysis {
 }
 
 export function analyzeBoundaries(root: string, appDir: string): BoundaryAnalysis {
-  const resolver = createResolver(root)
+  const graph = projectGraph(root)
   const facts = new Map<string, FileFacts>()
   const getFacts = (f: string) => {
-    if (!facts.has(f)) facts.set(f, collectFacts(f, (s, from) => resolver.resolve(s, from))!)
+    if (!facts.has(f)) facts.set(f, collectFacts(f, graph)!)
     return facts.get(f)
   }
 
@@ -217,7 +218,6 @@ export function analyzeBoundaries(root: string, appDir: string): BoundaryAnalysi
   const clientImporters = new Map<string, Set<string>>()
   const entries = serverEntries(buildAppTree(appDir))
 
-  // BFS over (file, env) states
   // BFS over (file, env, names requested from it). Names only matter for pure barrels; null = everything.
   const queue: [string, Env, string | null, string[] | null][] = entries.map(e => [e, 'server', null, null])
   const barrelNamesSeen = new Set<string>()
