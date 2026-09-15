@@ -51,14 +51,14 @@ Requires Node.js 20.11 or later. Create `.mcp.json` in your project root:
 To run from source instead (for development, or to refresh the bundled Next.js docs):
 
 ```bash
-git clone https://github.com/shanewin/codebase-lens.git
-cd codebase-lens
+git clone https://github.com/shanewin/nextjs-lens.git
+cd nextjs-lens
 npm install
 npm run fetch-docs   # pull the latest Next.js docs (optional)
 npm run build
 ```
 
-Then use `"command": "node"` and `"args": ["/absolute/path/to/codebase-lens/dist/server.js"]` in `.mcp.json`.
+Then use `"command": "node"` and `"args": ["/absolute/path/to/nextjs-lens/dist/server.js"]` in `.mcp.json`.
 
 In a monorepo, point `PROJECT_PATH` at the repo root: nextjs-lens analyzes the Next.js app with the most routes. To choose a different app, set `"NEXTJS_LENS_APP": "apps/admin"` (a path relative to `PROJECT_PATH`) in `env`. If no Next.js app is found, the server exits with an error explaining why.
 

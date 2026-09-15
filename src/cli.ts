@@ -19,7 +19,7 @@ Check options:
 
 Check exit codes: 0 passed (or warn/off mode), 1 enforce mode found errors, 2 could not run
 
-Docs: https://github.com/shanewin/codebase-lens#readme`
+Docs: https://github.com/shanewin/nextjs-lens#readme`
 
 const [command, ...rest] = process.argv.slice(2)
 

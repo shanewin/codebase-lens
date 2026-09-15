@@ -56,7 +56,7 @@ export function toSarif(report: CheckResult, toolVersion: string): object {
         driver: {
           name: 'nextjs-lens',
           version: toolVersion,
-          informationUri: 'https://github.com/shanewin/codebase-lens',
+          informationUri: 'https://github.com/shanewin/nextjs-lens',
           rules: [...rules.values()],
         },
       },
