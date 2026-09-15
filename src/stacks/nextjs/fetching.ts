@@ -1,8 +1,9 @@
-import { readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import ts from 'typescript'
 import type { ToolCollector } from '../../core/types.js'
-import { bodyDirectives, createResolver, fileDirective, getExports, getImports, lineOf, literalExport, parseFile, type Resolver } from './ast.js'
+import {
+  bodyDirectives, createResolver, fileDirective, getExports, getImports, lineOf, literalExport, nextMajorVersion, parseFile, type Resolver,
+} from './ast.js'
 import { buildAppTree, resolveAppRoutes, type Finding } from './routes.js'
 
 // How far to follow a route's imports looking for data helpers (route → lib/data.ts → lib/session.ts → …)
@@ -37,15 +38,6 @@ interface ModuleFacts {
   starReexports: string[]
   /** 'use client' / 'use server' modules don't run during server rendering of the route, so they aren't followed */
   boundary: boolean
-}
-
-function nextMajorVersion(root: string): number | null {
-  try {
-    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'))
-    const range = { ...pkg.dependencies, ...pkg.devDependencies }.next
-    const m = typeof range === 'string' ? range.match(/(\d+)/) : null
-    return m ? Number(m[1]) : null
-  } catch { return null }
 }
 
 function containsFunction(e: ts.Expression): boolean {

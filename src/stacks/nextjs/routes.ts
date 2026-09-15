@@ -2,7 +2,7 @@ import { readdirSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { walkFiles } from '../../core/helpers.js'
 import type { ToolCollector } from '../../core/types.js'
-import { fileDirective, getExports, literalExport, parseFile } from './ast.js'
+import { fileDirective, getExports, literalExport, nextMajorVersion, parseFile } from './ast.js'
 
 export const HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 
@@ -184,6 +184,7 @@ export interface Finding {
 export function auditAppTree(root: string, tree: SegmentNode, routes: ResolvedRoute[]): Finding[] {
   const findings: Finding[] = []
   const rel = (p: string) => relative(root, p)
+  const nextMajor = nextMajorVersion(root)
 
   const visit = (node: SegmentNode, hasLayoutAbove: boolean): void => {
     const f = node.files
@@ -209,7 +210,20 @@ export function auditAppTree(root: string, tree: SegmentNode, routes: ResolvedRo
       }
     }
     if (node.kind === 'parallel' && !f.default) {
-      findings.push({ severity: 'medium', detail: `Parallel slot ${node.name} has no default.* — hard navigation to sub-routes the slot doesn't match will 404`, file: rel(node.dir), route: node.path })
+      // Next.js 16 made default.js mandatory for every slot; earlier versions only 404 on a hard navigation
+      findings.push(nextMajor !== null && nextMajor >= 16
+        ? {
+          severity: 'high',
+          detail: `Parallel slot ${node.name} has no default.* — Next.js 16 fails the build without one; add a default.tsx that returns null or calls notFound()`,
+          file: rel(node.dir),
+          route: node.path,
+        }
+        : {
+          severity: 'medium',
+          detail: `Parallel slot ${node.name} has no default.* — hard navigation to sub-routes the slot doesn't match will 404, and Next.js 16 builds fail without it`,
+          file: rel(node.dir),
+          route: node.path,
+        })
     }
     if (f.page && !hasLayoutAbove && !f.layout) {
       findings.push({ severity: 'high', detail: `Page at "${node.path}" has no root layout above it`, file: rel(f.page), route: node.path })

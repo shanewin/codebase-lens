@@ -468,6 +468,18 @@ export function projectSourceFiles(root: string): string[] {
   return files.filter(f => !f.endsWith('.d.ts'))
 }
 
+/** Major version of the `next` dependency in the app's package.json ("^16.2.3" → 16), or null if it can't be read. */
+export function nextMajorVersion(root: string): number | null {
+  const text = readFileSafe(join(root, 'package.json'))
+  if (!text) return null
+  try {
+    const pkg = JSON.parse(text)
+    const range = { ...pkg.dependencies, ...pkg.devDependencies }.next
+    const m = typeof range === 'string' ? range.match(/(\d+)/) : null
+    return m ? Number(m[1]) : null
+  } catch { return null }
+}
+
 export const ROUTE_FILE_EXT = /\.(tsx|ts|jsx|js|mdx|md)$/
 
 export function baseName(file: string): string {
