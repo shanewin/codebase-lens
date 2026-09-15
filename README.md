@@ -118,6 +118,7 @@ Add `.codebase-lens.json` to `PROJECT_PATH` (or to the analyzed app's directory)
 
 ```json
 {
+  "authFunctions": ["makeSureLoggedIn", "requireOrgMember"],
   "exempt": ["/api/public/*", "/api/search"],
   "severity": {
     "src/app/api/cron/*": "critical",
@@ -132,6 +133,7 @@ Add `.codebase-lens.json` to `PROJECT_PATH` (or to the analyzed app's directory)
 | `exempt` | Drops findings whose file or route matches. A finding that lists many routes (such as "route handlers not matched by middleware") loses only the exempt routes. |
 | `severity` | Reports matching findings at `critical`, `high`, `medium`, `low`, or `info`. The original level is kept in `original_severity`. |
 | `ignore` | Removes matching files from `find_unused_exports` results. |
+| `authFunctions` | Names of your own auth check functions. `audit_route_auth`, `find_server_actions`, and `analyze_middleware` treat calls to them as auth checks, alongside the built-in list (`auth()`, `getServerSession`, `currentUser`, …) and any helper that calls one of those. |
 
 Patterns match file paths (relative to the app directory) or URL routes:
 

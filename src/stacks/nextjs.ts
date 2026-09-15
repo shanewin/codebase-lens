@@ -207,9 +207,15 @@ export function registerNextjsTools(tools: ToolCollector, appRoot: string): void
       'Analyze middleware.ts / proxy.ts via the AST: parsed matcher config (string, array, or { source } objects), auth logic, ' +
       'redirect/rewrite usage, and — by evaluating each matcher against the real App Router route list — exactly which pages and ' +
       'route handlers the middleware runs on and which it skips. On Next.js 16, gives middleware-to-proxy migration advice that accounts for the Edge runtime.',
-    parameters: { type: 'object', properties: {}, required: [] },
-    execute: async () => {
-      const mw = readMiddleware(root, new Set(['auth', 'getToken', 'getSession', 'getUser', 'verifySession', 'jwtVerify', 'verify']))
+    parameters: {
+      type: 'object',
+      properties: {
+        auth_functions: { type: 'string', description: 'Comma-separated names of project-specific auth functions to treat as auth logic (optional). Names listed in .codebase-lens.json authFunctions are always included.' },
+      },
+      required: [],
+    },
+    execute: async (args: { auth_functions?: string }) => {
+      const mw = readMiddleware(root, new Set(['auth', 'getToken', 'getSession', 'getUser', 'verifySession', 'jwtVerify', 'verify', ...(args.auth_functions ?? '').split(',').map(n => n.trim()).filter(Boolean)]))
       const major = majorVersion(nextVersion(root))
       if (!mw) return { exists: false, note: `No ${major && major >= 16 ? 'proxy' : 'middleware'} file found in project root or src/` }
 

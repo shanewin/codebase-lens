@@ -8,7 +8,7 @@ import { join } from 'node:path'
 export const RULES_FILE = '.codebase-lens.json'
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info']
-const KNOWN_KEYS = ['exempt', 'severity', 'ignore']
+const KNOWN_KEYS = ['exempt', 'severity', 'ignore', 'authFunctions']
 
 export interface LensRules {
   /** Route ("/api/public/*") or file ("src/app/api/health/*") patterns whose findings are dropped */
@@ -17,6 +17,8 @@ export interface LensRules {
   severity: Record<string, string>
   /** File patterns removed from find_unused_exports results */
   ignore: string[]
+  /** The project's own auth check functions (e.g. "makeSureLoggedIn"), treated as auth checks alongside the built-in list */
+  authFunctions: string[]
 }
 
 export interface LoadedRules {
@@ -27,7 +29,7 @@ export interface LoadedRules {
   error: string | null
 }
 
-const EMPTY_RULES: LensRules = { exempt: [], severity: {}, ignore: [] }
+const EMPTY_RULES: LensRules = { exempt: [], severity: {}, ignore: [], authFunctions: [] }
 
 /** Load the first rules file found in `dirs` (PROJECT_PATH, then the analyzed app directory). */
 export function loadRules(dirs: string[]): LoadedRules {
@@ -66,12 +68,24 @@ export function loadRules(dirs: string[]): LoadedRules {
       }
     }
   }
+  const authFunctions: string[] = []
+  if (raw.authFunctions !== undefined) {
+    if (!Array.isArray(raw.authFunctions)) {
+      problems.push('"authFunctions" must be an array of function names')
+    } else {
+      for (const name of raw.authFunctions) {
+        if (typeof name === 'string' && /^[A-Za-z_$][\w$]*$/.test(name)) authFunctions.push(name)
+        else problems.push(`authFunctions entry ${JSON.stringify(name)} is not a function name`)
+      }
+    }
+  }
+
   for (const key of Object.keys(raw)) {
     if (!KNOWN_KEYS.includes(key)) problems.push(`unknown key "${key}" (expected ${KNOWN_KEYS.join(', ')})`)
   }
 
   return {
-    rules: { exempt: stringList('exempt'), severity, ignore: stringList('ignore') },
+    rules: { exempt: stringList('exempt'), severity, ignore: stringList('ignore'), authFunctions },
     path,
     error: problems.length ? problems.join('; ') : null,
   }
@@ -79,7 +93,7 @@ export function loadRules(dirs: string[]): LoadedRules {
 
 export function describeRules({ rules, path, error }: LoadedRules): string {
   if (!path) return `none (no ${RULES_FILE} found)`
-  const counts = `${rules.exempt.length} exemptions, ${Object.keys(rules.severity).length} severity overrides, ${rules.ignore.length} ignore patterns`
+  const counts = `${rules.exempt.length} exemptions, ${Object.keys(rules.severity).length} severity overrides, ${rules.ignore.length} ignore patterns, ${rules.authFunctions.length} auth functions`
   return `loaded from ${path} (${counts})${error ? `; problems: ${error}` : ''}`
 }
 

@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { registerNextjsTools } from '../dist/stacks/nextjs.js'
 import { after, before, describe, it } from 'node:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -56,7 +60,7 @@ describe('server over MCP (monorepo root with .codebase-lens.json)', () => {
     const status = await client.readResource({ uri: 'lens://status' })
     const text = status.contents[0].text
     assert.match(text, /analyzing Next\.js app at apps\/site/)
-    assert.match(text, /Rules: loaded from .*\.codebase-lens\.json \(0 exemptions, 1 severity overrides, 1 ignore patterns\)/)
+    assert.match(text, /Rules: loaded from .*\.codebase-lens\.json \(0 exemptions, 1 severity overrides, 1 ignore patterns, 0 auth functions\)/)
   })
 
   it('exposes knowledge files as resources, one per docs page', async () => {
@@ -91,5 +95,62 @@ describe('server over MCP (monorepo root with .codebase-lens.json)', () => {
     const leak = result.findings.find(f => f.detail.includes('"pg"'))
     assert.equal(leak.severity, 'medium')
     assert.equal(leak.original_severity, 'high')
+  })
+})
+
+describe('server with authFunctions in .codebase-lens.json', () => {
+  let client
+  let dir
+
+  before(async () => {
+    // A copy of the app fixture with a route guarded by a helper the tool can't recognize on its own
+    dir = mkdtempSync(join(tmpdir(), 'lens-auth-functions-'))
+    cpSync(fixture('app'), dir, { recursive: true })
+    writeFileSync(join(dir, 'src', 'lib', 'guards.ts'), [
+      'export async function makeSureLoggedIn(request: Request) {',
+      "  const token = new URL(request.url).searchParams.get('t')",
+      "  if (!token || token.length < 32) throw new Response('Unauthorized', { status: 401 })",
+      '}',
+      '',
+    ].join('\n'))
+    mkdirSync(join(dir, 'src', 'app', 'api', 'custom'), { recursive: true })
+    writeFileSync(join(dir, 'src', 'app', 'api', 'custom', 'route.ts'), [
+      "import { makeSureLoggedIn } from '@/lib/guards'",
+      '',
+      'export async function POST(request: Request) {',
+      '  await makeSureLoggedIn(request)',
+      '  return Response.json({ ok: true })',
+      '}',
+      '',
+    ].join('\n'))
+    writeFileSync(join(dir, '.codebase-lens.json'), JSON.stringify({ authFunctions: ['makeSureLoggedIn'] }))
+
+    const transport = new StdioClientTransport({ command: process.execPath, args: [SERVER], env: { ...process.env, PROJECT_PATH: dir }, stderr: 'pipe' })
+    client = new Client({ name: 'codebase-lens-test', version: '1.0.0' })
+    await client.connect(transport)
+  })
+
+  after(async () => {
+    await client?.close()
+  })
+
+  it('does not recognize the custom guard without the config', async () => {
+    const tools = []
+    registerNextjsTools({ register: t => tools.push(t) }, dir)
+    const { endpoints } = await tools.find(t => t.name === 'audit_route_auth').execute({})
+    assert.equal(endpoints.find(e => e.path === '/api/custom').status, 'unprotected')
+  })
+
+  it('treats calls to configured auth functions as auth checks', async () => {
+    const response = await client.callTool({ name: 'audit_route_auth', arguments: { detail: 'full' } })
+    const { endpoints } = JSON.parse(response.content[0].text)
+    const custom = endpoints.find(e => e.path === '/api/custom')
+    assert.equal(custom.status, 'protected')
+    assert.ok(custom.signals.some(s => s.evidence === 'makeSureLoggedIn()'))
+  })
+
+  it('reports the configured auth functions in the status resource', async () => {
+    const status = await client.readResource({ uri: 'lens://status' })
+    assert.match(status.contents[0].text, /1 auth functions/)
   })
 })

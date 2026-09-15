@@ -149,6 +149,11 @@ for (const tool of tools) {
   const handler = async (args: any) => {
     try {
       const { detail, ...toolArgs } = args ?? {}
+      // Auth functions declared in .codebase-lens.json apply to every call of a tool that accepts auth_functions
+      if (rules.authFunctions.length && tool.parameters.properties.auth_functions) {
+        const passed = typeof toolArgs.auth_functions === 'string' ? toolArgs.auth_functions.split(',') : []
+        toolArgs.auth_functions = [...new Set([...rules.authFunctions, ...passed].map(s => s.trim()).filter(Boolean))].join(',')
+      }
       const raw = await tool.execute(toolArgs)
       // Rules first, so summaries count and list only what survives exemptions and ignores
       const ruled = applyRules(raw, rules)

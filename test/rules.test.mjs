@@ -76,13 +76,20 @@ describe('loadRules', () => {
     assert.equal(loaded.error, null)
   })
 
+  it('reads authFunctions and rejects entries that are not function names', () => {
+    const loaded = loadRules([dirWith(JSON.stringify({ authFunctions: ['makeSureLoggedIn', 'require-org', 42] }))])
+    assert.deepEqual(loaded.rules.authFunctions, ['makeSureLoggedIn'])
+    assert.match(loaded.error, /authFunctions entry "require-org" is not a function name/)
+    assert.match(loaded.error, /authFunctions entry 42 is not a function name/)
+  })
+
   it('reports invalid JSON instead of silently ignoring it', () => {
     assert.match(loadRules([dirWith('{ nope')]).error, /invalid JSON/)
   })
 
   it('keeps valid entries and reports invalid ones', () => {
     const loaded = loadRules([dirWith(JSON.stringify({ exempt: ['/api/health'], severity: { a: 'urgent', b: 'low' }, extra: true }))])
-    assert.deepEqual(loaded.rules, { exempt: ['/api/health'], severity: { b: 'low' }, ignore: [] })
+    assert.deepEqual(loaded.rules, { exempt: ['/api/health'], severity: { b: 'low' }, ignore: [], authFunctions: [] })
     assert.match(loaded.error, /severity for "a"/)
     assert.match(loaded.error, /unknown key "extra"/)
   })
