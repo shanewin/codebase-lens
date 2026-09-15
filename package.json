@@ -1,6 +1,6 @@
 {
   "name": "codebase-lens",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server that gives Claude Code deep Next.js intelligence — AST-based route trees, server/client boundaries, auth coverage, and dead export detection.",
   "type": "module",
   "main": "dist/server.js",

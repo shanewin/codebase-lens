@@ -124,7 +124,7 @@ const detectionSummary = [`Next.js app: ${appRoot}`, resolution.note].filter(Boo
 
 const server = new McpServer({
   name: 'codebase-lens',
-  version: '0.1.0',
+  version: '0.2.0',
 })
 
 // Register each collected tool
