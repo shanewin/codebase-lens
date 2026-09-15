@@ -103,8 +103,7 @@ registerStyleTools(collector, root)
 
 // 2. Locate the Next.js app (PROJECT_PATH, CODEBASE_LENS_APP, or a monorepo's main app) and register its tools
 const resolution = resolveNextApp(root, process.env.CODEBASE_LENS_APP)
-// `in` narrowing works without strictNullChecks (tsconfig has strict: false); `!resolution.ok` does not
-if ('error' in resolution) {
+if (!resolution.ok) {
   console.error(`ERROR: ${resolution.error}`)
   process.exit(1)
 }

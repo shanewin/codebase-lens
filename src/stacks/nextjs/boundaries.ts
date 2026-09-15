@@ -345,7 +345,8 @@ export function registerBoundaryTools(tools: ToolCollector, root: string, appDir
       const rel = (f: string) => relative(root, f)
 
       if (args.file) {
-        const abs = [...a.envs.keys()].find(f => rel(f) === args.file.replace(/^\.\//, ''))
+        const wanted = args.file.replace(/^\.\//, '')
+        const abs = [...a.envs.keys()].find(f => rel(f) === wanted)
         if (!abs) return { file: args.file, reachable: false, note: 'Not reachable from any App Router page/layout (unused, Pages Router, or only imported via type imports)' }
         const envs = [...a.envs.get(abs)!]
         return {
