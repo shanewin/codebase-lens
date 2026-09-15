@@ -70,6 +70,8 @@ export interface ExportInfo {
   init?: ts.Expression
   /** Module specifier for re-exports */
   from?: string
+  /** For re-exports: the name in the source module (`export { default as Loader } from` → 'default'; `export * as ns` → '*') */
+  originalName?: string
 }
 
 function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
@@ -159,7 +161,7 @@ export function getExports(sf: ts.SourceFile): ExportInfo[] {
           const local = (el.propertyName ?? el.name).text
           const typeOnly = s.isTypeOnly || el.isTypeOnly
           if (from) {
-            out.push({ name: el.name.text, kind: 'reexport', line: lineOf(sf, el), typeOnly, from })
+            out.push({ name: el.name.text, originalName: local, kind: 'reexport', line: lineOf(sf, el), typeOnly, from })
           } else {
             const found = findLocal(sf, local)
             out.push({ name: el.name.text, kind: found?.kind ?? 'variable', line: lineOf(sf, el), typeOnly, fn: found?.fn, init: found?.init })
@@ -167,7 +169,7 @@ export function getExports(sf: ts.SourceFile): ExportInfo[] {
         }
       } else {
         // export * as ns from '...'
-        out.push({ name: s.exportClause.name.text, kind: 'reexport', line: lineOf(sf, s), typeOnly: s.isTypeOnly, from })
+        out.push({ name: s.exportClause.name.text, originalName: '*', kind: 'reexport', line: lineOf(sf, s), typeOnly: s.isTypeOnly, from })
       }
     }
   }
@@ -251,19 +253,69 @@ export interface Resolver {
   resolve(specifier: string, fromFile: string): string | null
 }
 
+interface PathsConfig {
+  /** Absolute baseUrl */
+  baseUrl?: string
+  paths?: Record<string, string[]>
+  /** Directory of the tsconfig that declared `paths` */
+  pathsBase?: string
+}
+
+/** Locate the file a tsconfig `extends` entry points at: a relative path, a workspace package, or node_modules. */
+function resolveExtends(spec: string, fromFile: string): string | null {
+  const asConfig = (p: string): string | null => {
+    if (existsSync(p) && statSync(p).isFile()) return p
+    if (existsSync(`${p}.json`)) return `${p}.json`
+    if (existsSync(join(p, 'tsconfig.json'))) return join(p, 'tsconfig.json')
+    return null
+  }
+  if (spec.startsWith('.') || spec.startsWith('/')) return asConfig(resolve(dirname(fromFile), spec))
+
+  const name = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]
+  const sub = spec.slice(name.length).replace(/^\//, '')
+  const pkg = findWorkspace(dirname(fromFile))?.packages.get(name)
+  if (pkg) return asConfig(join(pkg.dir, sub || 'tsconfig.json'))
+  for (let dir = dirname(fromFile); ; dir = dirname(dir)) {
+    const hit = asConfig(join(dir, 'node_modules', spec))
+    if (hit) return hit
+    if (dirname(dir) === dir) return null
+  }
+}
+
+/** baseUrl/paths from a tsconfig, following `extends` (string or array); the child's values replace the parent's. */
+function readPathsConfig(file: string, seen = new Set<string>()): PathsConfig {
+  if (seen.has(file)) return {}
+  seen.add(file)
+  const { config } = ts.readConfigFile(file, ts.sys.readFile) // tolerates comments + trailing commas
+  if (!config) return {}
+
+  let merged: PathsConfig = {}
+  const ext = config.extends
+  for (const spec of Array.isArray(ext) ? ext : ext ? [ext] : []) {
+    const target = typeof spec === 'string' ? resolveExtends(spec, file) : null
+    if (target) merged = { ...merged, ...readPathsConfig(target, seen) }
+  }
+  const opts = config.compilerOptions ?? {}
+  if (opts.baseUrl) merged.baseUrl = resolve(dirname(file), opts.baseUrl)
+  if (opts.paths) { merged.paths = opts.paths; merged.pathsBase = dirname(file) }
+  return merged
+}
+
 export function createResolver(root: string): Resolver {
   let baseUrl = root
   let hasBaseUrl = false
   const paths: [string, string[]][] = []
+  let pathsBase = root
   for (const name of ['tsconfig.json', 'jsconfig.json']) {
     const p = join(root, name)
     if (!existsSync(p)) continue
-    const { config } = ts.readConfigFile(p, ts.sys.readFile) // tolerates comments + trailing commas
-    const opts = config?.compilerOptions ?? {}
-    if (opts.baseUrl) { baseUrl = resolve(root, opts.baseUrl); hasBaseUrl = true }
-    for (const [k, v] of Object.entries(opts.paths ?? {})) {
+    const cfg = readPathsConfig(p)
+    if (cfg.baseUrl) { baseUrl = cfg.baseUrl; hasBaseUrl = true }
+    for (const [k, v] of Object.entries(cfg.paths ?? {})) {
       if (Array.isArray(v)) paths.push([k, v as string[]])
     }
+    // TypeScript resolves `paths` against baseUrl when set, otherwise against the tsconfig that declares them
+    pathsBase = cfg.baseUrl ?? cfg.pathsBase ?? root
     break
   }
   // Longest alias first so '@/components/*' beats '@/*'
@@ -286,7 +338,7 @@ export function createResolver(root: string): Resolver {
           if (star ? !specifier.startsWith(prefix) : specifier !== alias) continue
           const rest = star ? specifier.slice(prefix.length) : ''
           for (const t of targets) {
-            result = tryFile(resolve(baseUrl, t.replace('*', rest)))
+            result = tryFile(resolve(pathsBase, t.replace('*', rest)))
             if (result) break
           }
           if (result) break

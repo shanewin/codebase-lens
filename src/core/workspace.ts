@@ -9,6 +9,8 @@ export interface NextAppCandidate {
   relPath: string
   /** Number of App Router page/route files plus Pages Router files — used to pick the main app */
   routeFiles: number
+  /** Total source files — breaks ties between apps with the same route count */
+  sourceFiles: number
 }
 
 const NEXT_CONFIGS = ['next.config.js', 'next.config.mjs', 'next.config.ts', 'next.config.mts', 'next.config.cjs']
@@ -146,7 +148,8 @@ export type NextAppResolution =
  * Decide which Next.js app to analyze: the CODEBASE_LENS_APP override if given, else PROJECT_PATH itself,
  * else (in a monorepo) the workspace app with the most routes.
  */
-export function resolveNextApp(root: string, override?: string): NextAppResolution {
+export function resolveNextApp(projectPath: string, override?: string): NextAppResolution {
+  const root = resolve(projectPath)
   if (override) {
     const overridePath = resolve(root, override)
     if (!isNextApp(overridePath)) {
@@ -191,8 +194,15 @@ export function findNextApps(root: string): NextAppCandidate[] {
     for (const dir of expand(root, pattern)) {
       if (seen.has(dir) || dir === root) continue
       seen.add(dir)
-      if (isNextApp(dir)) apps.push({ path: dir, relPath: relative(root, dir), routeFiles: countRouteFiles(dir) })
+      if (isNextApp(dir)) {
+        apps.push({
+          path: dir,
+          relPath: relative(root, dir),
+          routeFiles: countRouteFiles(dir),
+          sourceFiles: walkFiles(dir, ['.tsx', '.ts', '.jsx', '.js', '.mdx']).length,
+        })
+      }
     }
   }
-  return apps.sort((a, b) => b.routeFiles - a.routeFiles || a.relPath.localeCompare(b.relPath))
+  return apps.sort((a, b) => b.routeFiles - a.routeFiles || b.sourceFiles - a.sourceFiles || a.relPath.localeCompare(b.relPath))
 }

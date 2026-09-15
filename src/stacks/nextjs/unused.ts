@@ -33,7 +33,7 @@ function frameworkExports(file: string, appDir: string | null, pagesDir: string 
   }
   if (pagesDir && file.startsWith(pagesDir + '/')) return PAGES_EXPORTS
   const parent = file.split('/').slice(-2, -1)[0]
-  if (ROOT_ENTRY_EXPORTS[base] && (parent === 'src' || !file.includes('/src/'))) return ROOT_ENTRY_EXPORTS[base]
+  if (Object.hasOwn(ROOT_ENTRY_EXPORTS, base) && (parent === 'src' || !file.includes('/src/'))) return ROOT_ENTRY_EXPORTS[base]
   return null
 }
 
@@ -88,6 +88,14 @@ export function registerUnusedTools(tools: ToolCollector, root: string, appDir: 
             markUsed(target, name === '*' ? '*' : origName, seen)
           }
         }
+      }
+
+      // Exports Next.js consumes by convention count as used even when a route file re-exports them from elsewhere:
+      // `export { POST } from '@/server/handlers/webhook'` marks the handler as used.
+      for (const [file, exps] of exportsByFile) {
+        const framework = frameworkExports(file, appDir, pagesDir)
+        if (!framework) continue
+        for (const e of exps) if (e.from && framework.has(e.name)) markUsed(file, e.name)
       }
 
       // In a monorepo, other packages can import the app by its package name (e.g. @acme/web/components/x).

@@ -1,13 +1,14 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import ts from 'typescript'
 import { walkFiles } from '../core/helpers.js'
 import type { ToolCollector } from '../core/types.js'
 import { findWorkspace } from '../core/workspace.js'
-import { bodyDirectives, createResolver, fileDirective, findDir, getImports, lineOf, literalExport, parseFile } from './nextjs/ast.js'
+import { createResolver, findDir, getImports, lineOf, parseFile } from './nextjs/ast.js'
 import { readMiddleware, matcherMatches, registerAuthTools } from './nextjs/auth.js'
 import { registerBoundaryTools } from './nextjs/boundaries.js'
 import { buildAppTree, registerRouteTools, resolveAppRoutes, type Finding } from './nextjs/routes.js'
+import { registerDataFetchingTools } from './nextjs/fetching.js'
 import { registerUnusedTools } from './nextjs/unused.js'
 
 const SECRET_ENV_NAME = /SECRET|PRIVATE|PASSWORD|PASSWD|SERVICE_ROLE|CREDENTIAL|(ADMIN|MASTER|WRITE|ACCESS|SERVER|SIGNING|ENCRYPTION)_?(KEY|TOKEN)|DATABASE_URL|CONNECTION_STRING/i
@@ -99,7 +100,9 @@ function get(obj: ConfigValue | undefined, path: string): ConfigValue | undefine
 // ---------------------------------------------------------------------------
 
 /** Register every Next.js analysis tool for the app at `root`. */
-export function registerNextjsTools(tools: ToolCollector, root: string): void {
+export function registerNextjsTools(tools: ToolCollector, appRoot: string): void {
+  // Tools compare and join absolute paths, so normalize a relative root up front
+  const root = resolve(appRoot)
   const appDir = findDir(root, ['src/app', 'app'])
   const pagesDir = findDir(root, ['src/pages', 'pages'])
 
@@ -107,6 +110,7 @@ export function registerNextjsTools(tools: ToolCollector, root: string): void {
   registerBoundaryTools(tools, root, appDir)
   registerAuthTools(tools, root, appDir, pagesDir)
   registerUnusedTools(tools, root, appDir, pagesDir)
+  registerDataFetchingTools(tools, root, appDir)
 
   // ---- Tool: audit_next_config ----
   tools.register({
@@ -227,7 +231,9 @@ export function registerNextjsTools(tools: ToolCollector, root: string): void {
       }
       const skippedRoutes = skipped.filter(r => r.type === 'route')
       if (mw.hasAuthLogic && skippedRoutes.length) {
-        findings.push({ severity: 'info', detail: `Route handlers not matched by middleware (need their own auth): ${skippedRoutes.map(r => r.path).join(', ')}` })
+        const summary = 'Route handlers not matched by middleware (need their own auth)'
+      const handlerPaths = skippedRoutes.map(r => r.path)
+      findings.push({ severity: 'info', detail: `${summary}: ${handlerPaths.join(', ')}`, summary, routes: handlerPaths })
       }
 
       return {
@@ -338,116 +344,6 @@ export function registerNextjsTools(tools: ToolCollector, root: string): void {
           ? 'Only env templates found — real values are likely supplied by the host; results are based on the templates'
           : undefined
       return { env_files: envFiles, ...(note ? { note } : {}), findings }
-    },
-  })
-
-  // ---- Tool: analyze_data_fetching ----
-  tools.register({
-    name: 'analyze_data_fetching',
-    description:
-      'Per-route rendering and caching analysis from the AST. For every App Router page, layout, and route handler: route segment config, ' +
-      'fetch() calls with their cache / next.revalidate / next.tags options, \'use cache\' (file or function level), cacheLife/cacheTag, ' +
-      'unstable_cache, React cache(), and dynamic API usage (cookies, headers, draftMode, connection, searchParams) — with an inferred ' +
-      'rendering mode. Analysis is per file; data helpers in imported modules are not followed.',
-    parameters: {
-      type: 'object',
-      properties: { path: { type: 'string', description: 'Only include routes under this URL prefix (optional)' } },
-      required: [],
-    },
-    execute: async (args: { path?: string }) => {
-      if (!appDir) return { error: 'No app/ directory found' }
-      const results: {
-        path: string; file: string
-        segment_config: Record<string, string | number | boolean>
-        fetches: { line: number; url: string; cache: string | null; revalidate: string | null; tags: string | null }[]
-        caching: string[]
-        dynamic_apis: string[]
-        rendering: string
-      }[] = []
-
-      const tree = buildAppTree(appDir)
-      const seen = new Set<string>()
-      const targets: { path: string; file: string }[] = []
-      for (const r of resolveAppRoutes(root, tree)) {
-        if (args.path && !r.path.startsWith(args.path)) continue
-        for (const f of [r.file, ...r.layouts]) if (!seen.has(f)) { seen.add(f); targets.push({ path: r.path, file: f }) }
-      }
-
-      for (const t of targets) {
-        const sf = parseFile(join(root, t.file))
-        if (!sf || /\.mdx?$/.test(t.file)) continue
-        const segment: Record<string, string | number | boolean> = {}
-        for (const key of ['dynamic', 'dynamicParams', 'revalidate', 'fetchCache', 'runtime']) {
-          const v = literalExport(sf, key)
-          if (v !== null) segment[key] = v
-        }
-        const caching = new Set<string>()
-        const dynamicApis = new Set<string>()
-        const fetches: (typeof results)[number]['fetches'] = []
-
-        if (fileDirective(sf) === 'use cache') caching.add("'use cache' (file)")
-        const nextHeadersLocals = new Set<string>()
-        for (const imp of getImports(sf)) {
-          if (imp.specifier === 'react' && imp.names.includes('cache')) caching.add('React cache()')
-          if (imp.specifier === 'next/headers' || imp.specifier === 'next/server') imp.names.forEach(n => nextHeadersLocals.add(n))
-        }
-
-        const visit = (n: ts.Node): void => {
-          if ((ts.isFunctionDeclaration(n) || ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && bodyDirectives(n).some(d => d.startsWith('use cache'))) {
-            caching.add(`'${bodyDirectives(n).find(d => d.startsWith('use cache'))}' (function)`)
-          }
-          if (ts.isCallExpression(n)) {
-            const callee = n.expression.getText(sf)
-            if (callee === 'fetch') {
-              const opts = n.arguments[1]
-              const prop = (o: ts.Expression | undefined, key: string): ts.Expression | undefined =>
-                o && ts.isObjectLiteralExpression(o)
-                  ? (o.properties.find(p => ts.isPropertyAssignment(p) && p.name.getText(sf) === key) as ts.PropertyAssignment | undefined)?.initializer
-                  : undefined
-              const next = prop(opts, 'next')
-              fetches.push({
-                line: lineOf(sf, n),
-                url: n.arguments[0]?.getText(sf).slice(0, 120) ?? '',
-                cache: prop(opts, 'cache')?.getText(sf) ?? null,
-                revalidate: prop(next, 'revalidate')?.getText(sf) ?? null,
-                tags: prop(next, 'tags')?.getText(sf) ?? null,
-              })
-            }
-            if (['cacheLife', 'unstable_cacheLife', 'cacheTag', 'unstable_cacheTag', 'unstable_cache', 'revalidateTag', 'revalidatePath', 'updateTag'].includes(callee)) caching.add(`${callee}()`)
-            if (['cookies', 'headers', 'draftMode', 'connection'].includes(callee) && nextHeadersLocals.has(callee)) dynamicApis.add(`${callee}()`)
-          }
-          if (ts.isIdentifier(n) && n.text === 'searchParams' && ts.isBindingElement(n.parent)) dynamicApis.add('searchParams')
-          if (ts.isPropertyAccessExpression(n) && n.name.text === 'searchParams' && n.expression.getText(sf) === 'props') dynamicApis.add('searchParams')
-          ts.forEachChild(n, visit)
-        }
-        visit(sf)
-
-        const noStore = fetches.some(f => /no-store/.test(f.cache ?? '') || f.revalidate === '0')
-        const rendering =
-          segment.dynamic === 'force-dynamic' || dynamicApis.size || noStore ? 'dynamic (per request)'
-          : segment.dynamic === 'force-static' || segment.dynamic === 'error' ? 'static (forced)'
-          : typeof segment.revalidate === 'number' && segment.revalidate > 0 ? `ISR (revalidate ${segment.revalidate}s)`
-          : 'static unless an imported module uses dynamic APIs'
-
-        if (Object.keys(segment).length || fetches.length || caching.size || dynamicApis.size) {
-          results.push({ path: t.path, file: t.file, segment_config: segment, fetches, caching: [...caching], dynamic_apis: [...dynamicApis], rendering })
-        }
-      }
-
-      const findings: Finding[] = []
-      for (const r of results) {
-        if (r.segment_config.dynamic === 'force-static' && r.dynamic_apis.length) {
-          findings.push({ severity: 'medium', detail: `dynamic = 'force-static' but uses ${r.dynamic_apis.join(', ')} — these return empty values at build time`, file: r.file })
-        }
-        if (r.segment_config.dynamic === 'error' && r.dynamic_apis.length) {
-          findings.push({ severity: 'high', detail: `dynamic = 'error' with ${r.dynamic_apis.join(', ')} — the build will fail`, file: r.file })
-        }
-        const major = majorVersion(nextVersion(root))
-        if (major !== null && major >= 15 && r.fetches.some(f => f.cache === null && f.revalidate === null) && !r.segment_config.revalidate && !r.caching.length) {
-          findings.push({ severity: 'info', detail: `fetch() without cache options is uncached by default since Next.js 15`, file: r.file })
-        }
-      }
-      return { count: results.length, files: results, findings }
     },
   })
 }

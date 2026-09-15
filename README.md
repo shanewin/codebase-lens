@@ -32,6 +32,8 @@ codebase-lens (MCP server over stdio)
 
 ### 1. Clone and build
 
+Requires Node.js 20.11 or later.
+
 ```bash
 git clone https://github.com/shanewin/codebase-lens.git
 cd codebase-lens
@@ -58,7 +60,9 @@ Create `.mcp.json` in your project root:
 }
 ```
 
-In a monorepo, point `PROJECT_PATH` at the repo root: codebase-lens analyzes the Next.js app with the most routes. To choose a different app, set `"CODEBASE_LENS_APP": "apps/admin"` (a path relative to `PROJECT_PATH`) in `env`.
+In a monorepo, point `PROJECT_PATH` at the repo root: codebase-lens analyzes the Next.js app with the most routes. To choose a different app, set `"CODEBASE_LENS_APP": "apps/admin"` (a path relative to `PROJECT_PATH`) in `env`. If no Next.js app is found, the server exits with an error explaining why.
+
+To tune findings for your project (exempt public routes, raise severities, ignore legacy files), add a [`.codebase-lens.json`](#project-rules) file.
 
 ### 3. Use it
 
@@ -81,8 +85,8 @@ Every tool parses source with the TypeScript compiler API (`ts.createSourceFile`
 | Tool | What it does |
 |------|-------------|
 | `get_route_tree` | App Router segment tree with inheritance resolved: the layout chain, templates, and the loading / error / not-found boundary that actually applies to each page, plus merged route segment config. Flags page+route conflicts, error boundaries without `'use client'`, parallel slots without `default`, missing root layouts, and route groups that collide on the same URL. |
-| `map_client_boundaries` | Walks the real import graph from every page and layout to find where `'use client'` starts the client tree. Reports which files ship to the browser, which stay on the server, and which run in both. Flags server-only code (`server-only`, Node builtins, DB/secret SDKs) in the client bundle with the full import chain, private `process.env` reads in client code, and hooks used in Server Components. Pass `file` to see why one file runs where it does. |
-| `audit_route_auth` | Per-method auth coverage for every route handler and Pages API route: auth calls, auth wrappers, header checks, and webhook signature checks, following same-file helpers. Evaluates the middleware/proxy matcher against real routes to separate endpoints protected in the handler, protected only by middleware, and unprotected. |
+| `map_client_boundaries` | Walks the real import graph from every page and layout to find where `'use client'` starts the client tree. Reports which files ship to the browser, which stay on the server, and which run in both. Flags server-only code (`server-only`, Node builtins, DB/secret SDKs) in the client bundle, listing every client import chain that reaches them, private `process.env` reads in client code, and hooks used in Server Components. Pass `file` to see why one file runs where it does. |
+| `audit_route_auth` | Per-method auth coverage for every route handler and Pages API route: auth calls, auth wrappers, credential header checks, shared-secret comparisons, and webhook signature checks. Follows helpers in the same file and handlers defined in other modules (re-exports, imported functions passed to wrappers). Handlers built with tRPC, GraphQL, or Auth.js are marked delegated rather than unprotected. Evaluates the middleware/proxy matcher against real routes to separate endpoints protected in the handler, protected only by middleware, and unprotected. |
 | `find_unused_exports` | Dead exports and unimported files. Follows barrel re-exports and dynamic imports, and ignores the exports Next.js consumes by convention (default exports, `metadata`, `generateStaticParams`, HTTP handlers, segment config, …). |
 
 **Focused audits**
@@ -90,11 +94,11 @@ Every tool parses source with the TypeScript compiler API (`ts.createSourceFile`
 | Tool | What it does |
 |------|-------------|
 | `list_routes` | Flat list of App Router + Pages Router routes with HTTP methods |
-| `find_server_actions` | Every server action (module-level and inline `'use server'`) with auth checks, input validation, and importers |
+| `find_server_actions` | Every server action (module-level and inline `'use server'`) with auth checks, input validation, and importers. Unauthenticated actions are graded: destroying data is critical, exporting data is high, cache-only revalidation is low |
 | `analyze_middleware` | Parsed matcher config, auth logic, and exactly which routes middleware/proxy runs on and which it skips |
-| `analyze_data_fetching` | Per-route segment config, `fetch` cache options, `'use cache'`, `cacheLife`/`cacheTag`, dynamic APIs, and the inferred rendering mode |
+| `analyze_data_fetching` | Per-route segment config, `fetch` cache options, `'use cache'`, `cacheLife`/`cacheTag`, dynamic APIs (followed into imported data helpers, with the file each came from), and the inferred rendering mode |
 | `audit_next_config` | Statically evaluates next.config (unwrapping plugin wrappers) and flags secrets in `env`, wildcard image hosts, ignored build errors, source maps, and missing security headers |
-| `audit_env_files` | Secret-looking `NEXT_PUBLIC_` vars, env files not covered by .gitignore, and public vars used in code but defined nowhere |
+| `audit_env_files` | Secret-looking `NEXT_PUBLIC_` vars, env files not covered by .gitignore (high when they contain secrets), `.env.example` templates and monorepo-root env files, and public vars used in code but defined nowhere |
 
 ### Generic (always available)
 
@@ -105,6 +109,35 @@ Every tool parses source with the TypeScript compiler API (`ts.createSourceFile`
 | `search_content` | Regex search across the codebase |
 | `trace_imports` | Build a dependency graph from any file |
 | `search_styles` | Find hardcoded colors/spacing escaping the design system |
+
+## Project Rules
+
+Add `.codebase-lens.json` to `PROJECT_PATH` (or to the analyzed app's directory) to adapt findings to your project:
+
+```json
+{
+  "exempt": ["/api/public/*", "/api/search"],
+  "severity": {
+    "src/app/api/cron/*": "critical",
+    "src/app/api/billing/webhook": "critical"
+  },
+  "ignore": ["src/lib/legacy/*", "src/components/Unused.tsx"]
+}
+```
+
+| Key | Effect |
+|-----|--------|
+| `exempt` | Drops findings whose file or route matches. A finding that lists many routes (such as "route handlers not matched by middleware") loses only the exempt routes. |
+| `severity` | Reports matching findings at `critical`, `high`, `medium`, `low`, or `info`. The original level is kept in `original_severity`. |
+| `ignore` | Removes matching files from `find_unused_exports` results. |
+
+Patterns match file paths (relative to the app directory) or URL routes:
+
+- `src/app/api/cron/*` or `/api/public/*`: everything under that prefix
+- `*` matches within one path segment, `**` across segments
+- A plain path matches itself and anything inside it, so `src/app/api/billing/webhook` covers its `route.ts`
+
+Rules match a finding's `file` and `route` fields, never its message text. Results that rules changed include a `rules_applied` count. Problems in the file (invalid JSON, unknown keys, unsupported severities) are logged to stderr and shown in the `lens://status` resource.
 
 ## Knowledge Resources
 
@@ -117,20 +150,37 @@ Two Markdown files are exposed as MCP resources that Claude can read:
 
 ```
 src/
-├── server.ts              # MCP entry point, app resolution, tool registration
+├── server.ts              # MCP entry point, app resolution, rules, tool registration
 ├── core/
 │   ├── types.ts           # ToolRegistration, ToolCollector interfaces
 │   ├── helpers.ts         # safePath, walkFiles, file utilities
+│   ├── rules.ts           # .codebase-lens.json loading and matching
 │   └── workspace.ts       # Finds the Next.js app (PROJECT_PATH, CODEBASE_LENS_APP, or monorepo workspaces)
 ├── scanners/              # Generic tools
 │   ├── files.ts           # File listing, reading, searching
 │   ├── imports.ts         # Import/dependency tracing
 │   └── styles.ts          # Design system compliance checking
 └── stacks/
-    └── nextjs.ts          # Next.js analysis tools
+    ├── nextjs.ts          # Registers the Next.js tools; config, middleware, and env audits
+    └── nextjs/
+        ├── ast.ts         # Parsing, exports/imports, module resolution (tsconfig paths and extends, workspaces)
+        ├── routes.ts      # Route tree and route list
+        ├── boundaries.ts  # Server/client boundary map
+        ├── auth.ts        # Route handler auth and server actions
+        ├── unused.ts      # Unused exports
+        └── fetching.ts    # Data fetching and caching
+test/                      # node --test suites and fixture apps
 knowledge/nextjs/          # Docs + community knowledge (MCP resources)
 scripts/fetch-docs.ts      # Doc fetcher
 ```
+
+## Development
+
+```bash
+npm test   # compiles, then runs node --test against the fixture apps in test/fixtures
+```
+
+`test/fixtures/app` (a single Next.js app) and `test/fixtures/mono` (a workspace monorepo) contain planted issues. The tests assert what each tool must find there and what it must not flag. CI runs the suite on Node 20 and 22.
 
 ## License
 

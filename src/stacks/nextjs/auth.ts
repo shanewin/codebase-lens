@@ -4,6 +4,7 @@ import ts from 'typescript'
 import type { ToolCollector } from '../../core/types.js'
 import {
   bodyDirectives, createResolver, fileDirective, getExports, getImports, lineOf, parseFile, projectSourceFiles,
+  type ExportInfo, type Resolver,
 } from './ast.js'
 import { buildAppTree, HTTP_METHODS, resolveAppRoutes, resolvePagesRoutes, type Finding } from './routes.js'
 
@@ -18,7 +19,32 @@ const DEFAULT_AUTH_CALLS = [
 ]
 const WEBHOOK_SIGNATURE_CALLS = ['constructEvent', 'constructEventAsync', 'verifySignature', 'verifyWebhook', 'verify']
 
-export interface AuthSignal { kind: 'auth-call' | 'wrapper' | 'header-check' | 'webhook-signature'; evidence: string; line: number }
+export interface AuthSignal {
+  kind: 'auth-call' | 'wrapper' | 'header-check' | 'webhook-signature' | 'secret-check' | 'delegated'
+  evidence: string
+  line: number
+}
+
+// Header names that carry credentials or request signatures
+const CREDENTIAL_HEADER = /^(authorization|x-api-key|api-key|cookie)$|signature|secret|token|hmac/i
+
+/** A `.get(x)` argument naming a credential header: a literal like 'x-hub-signature' or a constant like SECRET_HEADER_NAME. */
+function isCredentialHeaderArg(sf: ts.SourceFile, arg: ts.Expression): boolean {
+  if (ts.isStringLiteralLike(arg)) return CREDENTIAL_HEADER.test(arg.text)
+  if (ts.isIdentifier(arg) || ts.isPropertyAccessExpression(arg)) return /SECRET|SIGNATURE|TOKEN|API_?KEY|AUTH/i.test(arg.getText(sf))
+  return false
+}
+
+/** One side of a comparison is a secret: process.env.CRON_SECRET, or a SCREAMING_CASE constant like WEBHOOK_SECRET. */
+function isSecretOperand(sf: ts.SourceFile, e: ts.Expression): boolean {
+  if (/process\.env\.\w*(SECRET|TOKEN|KEY|PASSWORD)\w*/i.test(e.getText(sf))) return true
+  return ts.isIdentifier(e) && /^[A-Z0-9_]*(SECRET|TOKEN)[A-Z0-9_]*$/.test(e.text)
+}
+
+const EQUALITY_OPERATORS = [
+  ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken,
+]
 
 function calleeName(expr: ts.Expression): string | null {
   if (ts.isIdentifier(expr)) return expr.text
@@ -36,18 +62,96 @@ export function findAuthSignals(sf: ts.SourceFile, node: ts.Node, authCalls: Set
       const text = n.expression.getText(sf)
       if (name && authCalls.has(name)) out.push({ kind: 'auth-call', evidence: `${text}()`, line: lineOf(sf, n) })
       else if (/\.auth\.getUser$|\.auth\.getSession$|\.auth\.getClaims$/.test(text)) out.push({ kind: 'auth-call', evidence: `${text}()`, line: lineOf(sf, n) })
-      else if (name && WEBHOOK_SIGNATURE_CALLS.includes(name) && /webhook|stripe|svix|signature|jwt|jose/i.test(sf.text)) out.push({ kind: 'webhook-signature', evidence: `${text}()`, line: lineOf(sf, n) })
-      else if (name === 'get' && n.arguments[0] && ts.isStringLiteralLike(n.arguments[0]) && /^(authorization|x-api-key|cookie)$/i.test(n.arguments[0].text)) {
-        out.push({ kind: 'header-check', evidence: `${text}('${n.arguments[0].text}')`, line: lineOf(sf, n) })
+      else if (name && ((WEBHOOK_SIGNATURE_CALLS.includes(name) && /webhook|stripe|svix|signature|jwt|jose/i.test(sf.text)) || ['createHmac', 'timingSafeEqual'].includes(name))) {
+        out.push({ kind: 'webhook-signature', evidence: `${text}()`, line: lineOf(sf, n) })
+      } else if (name === 'get' && n.arguments[0] && isCredentialHeaderArg(sf, n.arguments[0])) {
+        out.push({ kind: 'header-check', evidence: `${text}(${n.arguments[0].getText(sf)})`, line: lineOf(sf, n) })
       } else if (name && depth === 0 && localFns.has(name)) {
         const inner = findAuthSignals(sf, localFns.get(name)!, authCalls, depth + 1)
         out.push(...inner.map(s => ({ ...s, evidence: `${name}() → ${s.evidence}` })))
       }
     }
+    if (ts.isBinaryExpression(n) && EQUALITY_OPERATORS.includes(n.operatorToken.kind) && (isSecretOperand(sf, n.left) || isSecretOperand(sf, n.right))) {
+      out.push({ kind: 'secret-check', evidence: n.getText(sf).slice(0, 80), line: lineOf(sf, n) })
+    }
     ts.forEachChild(n, visit)
   }
   visit(node)
   return out
+}
+
+// Handlers built by frameworks that enforce auth per procedure/resolver, or that are auth endpoints themselves
+const DELEGATING_FACTORIES: Record<string, string> = {
+  createNextApiHandler: 'tRPC checks auth per procedure',
+  fetchRequestHandler: 'tRPC checks auth per procedure',
+  createNextRouteHandler: 'tRPC checks auth per procedure',
+  createYoga: 'GraphQL Yoga checks auth per resolver',
+  startServerAndCreateNextHandler: 'Apollo Server checks auth per resolver',
+  NextAuth: 'Auth.js endpoint; sign-in and callback routes are public by design',
+  toNextJsHandler: 'Better Auth endpoint; sign-in and callback routes are public by design',
+}
+
+function delegationSignal(sf: ts.SourceFile, node: ts.Node | undefined): AuthSignal | null {
+  if (!node) return null
+  let found: AuthSignal | null = null
+  const visit = (n: ts.Node): void => {
+    if (found) return
+    if (ts.isCallExpression(n)) {
+      const name = calleeName(n.expression)
+      // hasOwn, not DELEGATING_FACTORIES[name]: `toString` and friends exist on every object
+      if (name && Object.hasOwn(DELEGATING_FACTORIES, name)) found = { kind: 'delegated', evidence: `${name}(): ${DELEGATING_FACTORIES[name]}`, line: lineOf(sf, n) }
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(node)
+  return found
+}
+
+/** `export const GET = wrap(handler)` or `export const GET = handler` where `handler` is imported: its module and exported name. */
+function importedHandler(sf: ts.SourceFile, init: ts.Expression | undefined): { specifier: string; name: string } | null {
+  const locals: string[] = []
+  const collect = (e: ts.Expression | undefined): void => {
+    if (!e) return
+    if (ts.isIdentifier(e)) locals.push(e.text)
+    else if (ts.isCallExpression(e)) e.arguments.forEach(a => collect(a))
+    else if (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e)) collect(e.expression)
+  }
+  collect(init)
+  for (const local of locals) {
+    for (const s of sf.statements) {
+      if (!ts.isImportDeclaration(s) || !ts.isStringLiteral(s.moduleSpecifier) || !s.importClause) continue
+      if (s.importClause.name?.text === local) return { specifier: s.moduleSpecifier.text, name: 'default' }
+      const nb = s.importClause.namedBindings
+      if (nb && ts.isNamedImports(nb)) {
+        const el = nb.elements.find(e => e.name.text === local)
+        if (el) return { specifier: s.moduleSpecifier.text, name: (el.propertyName ?? el.name).text }
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Auth evidence for one exported route handler. When the handler lives in another module — a re-export
+ * (`export { default } from 'pkg/webhook'`) or an imported function passed to a wrapper — follow it there.
+ */
+function handlerSignals(root: string, file: string, sf: ts.SourceFile, exp: ExportInfo, authCalls: Set<string>, resolver: Resolver, depth = 0): AuthSignal[] {
+  const signals: AuthSignal[] = []
+  const wrap = wrapperSignal(sf, exp.init, authCalls)
+  if (wrap) signals.push(wrap)
+  const delegated = delegationSignal(sf, exp.init ?? exp.fn)
+  if (delegated) signals.push(delegated)
+  if (exp.fn) signals.push(...findAuthSignals(sf, exp.fn, authCalls))
+  if (signals.length || depth >= 3) return signals
+
+  const target = exp.from ? { specifier: exp.from, name: exp.originalName ?? exp.name } : importedHandler(sf, exp.init)
+  if (!target) return signals
+  const targetFile = resolver.resolve(target.specifier, file)
+  const targetSf = targetFile ? parseFile(targetFile) : null
+  const targetExp = targetSf ? getExports(targetSf).find(e => e.name === target.name) : undefined
+  if (!targetFile || !targetSf || !targetExp) return signals
+  return handlerSignals(root, targetFile, targetSf, targetExp, authCalls, resolver, depth + 1)
+    .map(s => s.evidence.includes(' (in ') ? s : { ...s, evidence: `${s.evidence} (in ${relative(root, targetFile)})` })
 }
 
 function collectLocalFunctions(sf: ts.SourceFile): Map<string, ts.Node> {
@@ -212,6 +316,25 @@ function destructiveEvidence(sf: ts.SourceFile, node: ts.Node, name: string): st
   return evidence ?? (DESTRUCTIVE_NAME.test(name) ? `name "${name}"` : null)
 }
 
+const DATA_EXPORT_NAME = /export|download|dump|backup/i
+const CACHE_CALLS = new Set(['revalidatePath', 'revalidateTag', 'updateTag', 'expirePath', 'expireTag', 'refresh'])
+
+/** An action whose name says it hands data back to the caller (exportData, downloadInvoices, …). */
+function dataExportEvidence(name: string): string | null {
+  return DATA_EXPORT_NAME.test(name) ? `name "${name}"` : null
+}
+
+/** True when every call in the action is a cache revalidation, e.g. `async function refreshList() { revalidatePath('/list') }`. */
+function isCacheOnly(node: ts.Node): boolean {
+  const calls: string[] = []
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n)) calls.push(calleeName(n.expression) ?? '')
+    ts.forEachChild(n, visit)
+  }
+  visit(node)
+  return calls.length > 0 && calls.every(c => CACHE_CALLS.has(c))
+}
+
 const SEVERITY_ORDER: Record<Finding['severity'], number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
 
 function authCallSet(extra?: string): Set<string> {
@@ -232,7 +355,9 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
       'and `export { handler as GET }`) and Pages Router API routes. Inspects each handler body with the TypeScript AST for auth calls ' +
       '(auth(), getServerSession, currentUser, supabase.auth.getUser, …), auth wrappers, Authorization/API-key header checks, and webhook signature ' +
       'verification, following calls into same-file helpers. Cross-references the middleware/proxy matcher to show which endpoints are only protected ' +
-      'by middleware. Unprotected mutations (POST/PUT/PATCH/DELETE) are high severity.',
+      'by middleware. Follows handlers defined in other modules (re-exports and imported functions passed to wrappers), recognizes ' +
+      'signature and shared-secret checks, and marks tRPC/GraphQL/Auth.js handlers as delegated (auth happens per procedure, or the route ' +
+      'is the auth endpoint). Unprotected mutations (POST/PUT/PATCH/DELETE) are high severity.',
     parameters: {
       type: 'object',
       properties: { auth_functions: EXTRA_PATTERNS_PARAM },
@@ -241,17 +366,21 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
     execute: async (args: { auth_functions?: string }) => {
       const authCalls = authCallSet(args.auth_functions)
       const mw = readMiddleware(root, authCalls)
+      const resolver = createResolver(root)
       const coveredByMiddleware = (path: string) =>
         !!mw?.hasAuthLogic && (mw.matchers === null || mw.matchers.some(m => matcherMatches(m, path)))
 
       const endpoints: {
         path: string; method: string; file: string; line: number
-        status: 'protected' | 'middleware-only' | 'unprotected'
+        status: 'protected' | 'delegated' | 'middleware-only' | 'unprotected'
         signals: AuthSignal[]
       }[] = []
 
       const classify = (path: string, method: string, file: string, line: number, signals: AuthSignal[]) => {
-        const status = signals.length ? 'protected' : coveredByMiddleware(path) ? 'middleware-only' : 'unprotected'
+        const status = signals.some(s => s.kind !== 'delegated') ? 'protected'
+          : signals.length ? 'delegated'
+          : coveredByMiddleware(path) ? 'middleware-only'
+          : 'unprotected'
         endpoints.push({ path, method, file, line, status, signals })
       }
 
@@ -260,9 +389,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
           const sf = parseFile(join(root, r.file))
           if (!sf) continue
           for (const exp of getExports(sf).filter(e => HTTP_METHODS.includes(e.name))) {
-            const wrap = wrapperSignal(sf, exp.init, authCalls)
-            const signals = [...(wrap ? [wrap] : []), ...(exp.fn ? findAuthSignals(sf, exp.fn, authCalls) : [])]
-            classify(r.path, exp.name, r.file, exp.line, signals)
+            classify(r.path, exp.name, r.file, exp.line, handlerSignals(root, join(root, r.file), sf, exp, authCalls, resolver))
           }
         }
       }
@@ -271,9 +398,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
           const sf = parseFile(join(root, r.file))
           if (!sf) continue
           const def = getExports(sf).find(e => e.name === 'default')
-          const wrap = wrapperSignal(sf, def?.init, authCalls)
-          const signals = [...(wrap ? [wrap] : []), ...(def?.fn ? findAuthSignals(sf, def.fn, authCalls) : [])]
-          classify(r.path, 'ANY', r.file, def?.line ?? 1, signals)
+          classify(r.path, 'ANY', r.file, def?.line ?? 1, def ? handlerSignals(root, join(root, r.file), sf, def, authCalls, resolver) : [])
         }
       }
 
@@ -285,12 +410,14 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
             severity: mutation ? 'high' : 'low',
             detail: `${e.method} ${e.path} has no auth check in the handler and is not covered by ${mw ? `${mw.kind} matcher` : 'any middleware/proxy'}`,
             file: `${e.file}:${e.line}`,
+            route: e.path,
           })
         } else if (e.status === 'middleware-only' && mutation) {
           findings.push({
             severity: 'medium',
             detail: `${e.method} ${e.path} relies solely on ${mw!.kind} for auth — a matcher change or CVE-2025-29927-style bypass leaves it open; check auth in the handler too`,
             file: `${e.file}:${e.line}`,
+            route: e.path,
           })
         }
       }
@@ -301,6 +428,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
       const summary = {
         total: endpoints.length,
         protected: endpoints.filter(e => e.status === 'protected').length,
+        delegated: endpoints.filter(e => e.status === 'delegated').length,
         middleware_only: endpoints.filter(e => e.status === 'middleware-only').length,
         unprotected: endpoints.filter(e => e.status === 'unprotected').length,
       }
@@ -326,7 +454,8 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
 
       const actions: {
         name: string; file: string; line: number; type: 'module' | 'inline'
-        auth: AuthSignal[]; destructive: string | null; validates_input: boolean; used_by: string[]
+        auth: AuthSignal[]; destructive: string | null; data_export: string | null; cache_only: boolean
+        validates_input: boolean; used_by: string[]
       }[] = []
       const validation = (sf: ts.SourceFile, node: ts.Node) => {
         let found = false
@@ -349,6 +478,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
             actions.push({
               name: exp.name, file: rel, line: exp.line, type: 'module',
               auth: findAuthSignals(sf, exp.fn, authCalls), destructive: destructiveEvidence(sf, exp.fn, exp.name),
+              data_export: dataExportEvidence(exp.name), cache_only: isCacheOnly(exp.fn),
               validates_input: validation(sf, exp.fn), used_by: [],
             })
           }
@@ -360,6 +490,7 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
             actions.push({
               name, file: rel, line: lineOf(sf, n), type: 'inline',
               auth: findAuthSignals(sf, n, authCalls), destructive: destructiveEvidence(sf, n, name),
+              data_export: dataExportEvidence(name), cache_only: isCacheOnly(n),
               validates_input: validation(sf, n), used_by: [],
             })
           }
@@ -386,18 +517,22 @@ export function registerAuthTools(tools: ToolCollector, root: string, appDir: st
         }
       }
 
-      const findings: Finding[] = actions.filter(a => a.auth.length === 0).map(a => a.destructive
-        ? {
-          severity: 'critical' as const,
-          detail: `Server action ${a.name} destroys data (${a.destructive}) with no auth check — anyone can call it via POST with its action ID`,
-          file: `${a.file}:${a.line}`,
+      // Unauthenticated actions, graded by what an anonymous caller could do with them
+      const unauthenticated = (a: (typeof actions)[number]): Finding => {
+        const file = `${a.file}:${a.line}`
+        if (a.destructive) {
+          return { severity: 'critical', detail: `Server action ${a.name} destroys data (${a.destructive}) with no auth check — anyone can call it via POST with its action ID`, file }
         }
-        : {
-          severity: 'medium' as const,
-          detail: `Server action ${a.name} has no auth check — it is callable by anyone via POST with its action ID`,
-          file: `${a.file}:${a.line}`,
-        })
-      for (const a of actions.filter(a => !a.validates_input)) {
+        if (a.data_export) {
+          return { severity: 'high', detail: `Server action ${a.name} exports data (${a.data_export}) with no auth check — anyone can call it via POST and receive the result`, file }
+        }
+        if (a.cache_only) {
+          return { severity: 'low', detail: `Server action ${a.name} has no auth check, but it only revalidates cached data — an anonymous caller can at most force a cache refresh`, file }
+        }
+        return { severity: 'medium', detail: `Server action ${a.name} has no auth check — it is callable by anyone via POST with its action ID`, file }
+      }
+      const findings: Finding[] = actions.filter(a => a.auth.length === 0).map(unauthenticated)
+      for (const a of actions.filter(a => !a.validates_input && !a.cache_only)) {
         findings.push({ severity: 'low', detail: `Server action ${a.name} does not validate its input with a schema parse`, file: `${a.file}:${a.line}` })
       }
       findings.sort((x, y) => SEVERITY_ORDER[x.severity] - SEVERITY_ORDER[y.severity])

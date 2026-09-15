@@ -1,7 +1,7 @@
 import { relative } from 'node:path'
 import ts from 'typescript'
 import type { ToolCollector } from '../../core/types.js'
-import { createResolver, fileDirective, getImports, parseFile } from './ast.js'
+import { createResolver, fileDirective, getExports, getImports, parseFile } from './ast.js'
 import { buildAppTree, type Finding, type SegmentNode } from './routes.js'
 
 // Node builtins with no browser fallback. Next.js polyfills process, path, crypto, os, zlib, buffer, stream, util,
@@ -32,7 +32,9 @@ type Env = 'server' | 'client'
 
 interface FileFacts {
   directive: string | null
-  imports: { resolved: string | null; specifier: string; line: number; typeOnly: boolean }[]
+  imports: { resolved: string | null; specifier: string; line: number; typeOnly: boolean; names: string[] | null }[]
+  /** For pure barrel files (only re-exports): what each exported name points at. Null for any other file. */
+  barrel: { name: string; originalName: string; resolved: string | null; line: number; typeOnly: boolean }[] | null
   clientApis: string[]          // hooks / createContext used
   browserGlobals: string[]      // top-of-render browser globals referenced
   privateEnvVars: string[]      // process.env.X without NEXT_PUBLIC_
@@ -94,13 +96,36 @@ function isModuleScopeGlobalReference(node: ts.Identifier): boolean {
 function collectFacts(file: string, resolve: (spec: string, from: string) => string | null): FileFacts | null {
   const sf = parseFile(file)
   if (!sf) return null
-  const imports = getImports(sf).map(i => ({ resolved: resolve(i.specifier, file), specifier: i.specifier, line: i.line, typeOnly: i.typeOnly }))
+  const imports = getImports(sf).map(i => ({
+    resolved: resolve(i.specifier, file),
+    specifier: i.specifier,
+    line: i.line,
+    typeOnly: i.typeOnly,
+    // null = the importer may use anything the module provides (namespace, dynamic, or side-effect import)
+    names: i.sideEffect || i.dynamic || i.names.includes('*') || i.names.length === 0 ? null : i.names,
+  }))
+
+  // A pure barrel only forwards other modules, so importing one name from it pulls in just that name's module
+  const pureBarrel = sf.statements.length > 0 && sf.statements.every(s =>
+    (ts.isExportDeclaration(s) && !!s.moduleSpecifier) ||
+    (ts.isImportDeclaration(s) && !!s.importClause?.isTypeOnly) ||
+    ts.isInterfaceDeclaration(s) || ts.isTypeAliasDeclaration(s) ||
+    (ts.isExpressionStatement(s) && ts.isStringLiteral(s.expression)))
+  const barrel = pureBarrel
+    ? getExports(sf).filter(e => e.from).map(e => ({
+      name: e.kind === 'star' ? '*' : e.name,
+      originalName: e.kind === 'star' ? '*' : e.originalName ?? e.name,
+      resolved: resolve(e.from!, file),
+      line: e.line,
+      typeOnly: e.typeOnly,
+    }))
+    : null
 
   // Which local names are client-only imports?
   const clientLocals = new Map<string, string>()
   for (const s of sf.statements) {
     if (!ts.isImportDeclaration(s) || !ts.isStringLiteral(s.moduleSpecifier)) continue
-    const list = CLIENT_ONLY_IMPORTS[s.moduleSpecifier.text]
+    const list = Object.hasOwn(CLIENT_ONLY_IMPORTS, s.moduleSpecifier.text) ? CLIENT_ONLY_IMPORTS[s.moduleSpecifier.text] : undefined
     const nb = s.importClause?.namedBindings
     if (!list || !nb || !ts.isNamedImports(nb)) continue
     for (const el of nb.elements) {
@@ -154,7 +179,7 @@ function collectFacts(file: string, resolve: (spec: string, from: string) => str
   }
   visit(sf)
 
-  return { directive: fileDirective(sf), imports, clientApis: [...clientApis], browserGlobals: [...browserGlobals], privateEnvVars: [...privateEnvVars] }
+  return { directive: fileDirective(sf), imports, barrel, clientApis: [...clientApis], browserGlobals: [...browserGlobals], privateEnvVars: [...privateEnvVars] }
 }
 
 function serverEntries(tree: SegmentNode): string[] {
@@ -193,9 +218,12 @@ export function analyzeBoundaries(root: string, appDir: string): BoundaryAnalysi
   const entries = serverEntries(buildAppTree(appDir))
 
   // BFS over (file, env) states
-  const queue: [string, Env, string | null][] = entries.map(e => [e, 'server', null])
+  // BFS over (file, env, names requested from it). Names only matter for pure barrels; null = everything.
+  const queue: [string, Env, string | null, string[] | null][] = entries.map(e => [e, 'server', null, null])
+  const barrelNamesSeen = new Set<string>()
+  const barrelFullySeen = new Set<string>()
   while (queue.length) {
-    const [file, incomingEnv, parent] = queue.shift()!
+    const [file, incomingEnv, parent, names] = queue.shift()!
     const f = getFacts(file)
     if (!f) continue
     // A 'use client' module switches the subtree to client; a 'use server' module imported by client code
@@ -203,26 +231,53 @@ export function analyzeBoundaries(root: string, appDir: string): BoundaryAnalysi
     const env: Env = f.directive === 'use client' ? 'client' : incomingEnv
     if (incomingEnv === 'client' && f.directive === 'use server') continue
     const set = envs.get(file) ?? new Set<Env>()
-    if (set.has(env)) continue
-    // A page/layout that is itself 'use client' is a boundary at the router level
-    if (parent === null && env === 'client') boundaries.push({ from: '(App Router)', to: relative(root, file), line: 1 })
-    set.add(env)
-    envs.set(file, set)
-    const key = `${file}\0${env}`
-    if (!parents.has(key)) parents.set(key, parent)
+    const firstVisit = !set.has(env)
+    if (firstVisit) {
+      // A page/layout that is itself 'use client' is a boundary at the router level
+      if (parent === null && env === 'client') boundaries.push({ from: '(App Router)', to: relative(root, file), line: 1 })
+      set.add(env)
+      envs.set(file, set)
+      const key = `${file}\0${env}`
+      if (!parents.has(key)) parents.set(key, parent)
+    }
 
-    for (const imp of f.imports) {
-      if (imp.typeOnly || !imp.resolved) continue
+    let edges: { resolved: string; line: number; names: string[] | null }[]
+    const envKey = `${file}\0${env}`
+    if (f.barrel && names && !barrelFullySeen.has(envKey)) {
+      // Follow only the re-exports that supply the requested names (through `export *` when not named directly)
+      const fresh = names.filter(n => !barrelNamesSeen.has(`${envKey}\0${n}`))
+      if (!fresh.length) continue
+      fresh.forEach(n => barrelNamesSeen.add(`${envKey}\0${n}`))
+      edges = []
+      for (const n of fresh) {
+        const live = f.barrel.filter(r => !r.typeOnly && r.resolved)
+        const direct = live.filter(r => r.name === n)
+        const via = direct.length ? direct : live.filter(r => r.name === '*')
+        for (const r of via) {
+          edges.push({ resolved: r.resolved!, line: r.line, names: r.originalName === '*' ? (r.name === '*' ? [n] : null) : [r.originalName] })
+        }
+      }
+    } else {
+      if (f.barrel) {
+        if (barrelFullySeen.has(envKey)) continue
+        barrelFullySeen.add(envKey)
+      } else if (!firstVisit) {
+        continue
+      }
+      edges = f.imports.filter(i => !i.typeOnly && i.resolved).map(i => ({ resolved: i.resolved!, line: i.line, names: i.names }))
+    }
+
+    for (const edge of edges) {
       if (env === 'client') {
-        const importers = clientImporters.get(imp.resolved) ?? new Set<string>()
+        const importers = clientImporters.get(edge.resolved) ?? new Set<string>()
         importers.add(file)
-        clientImporters.set(imp.resolved, importers)
+        clientImporters.set(edge.resolved, importers)
       }
-      const target = getFacts(imp.resolved)
+      const target = getFacts(edge.resolved)
       if (env === 'server' && target?.directive === 'use client') {
-        boundaries.push({ from: relative(root, file), to: relative(root, imp.resolved), line: imp.line })
+        boundaries.push({ from: relative(root, file), to: relative(root, edge.resolved), line: edge.line })
       }
-      queue.push([imp.resolved, env, file])
+      queue.push([edge.resolved, env, file, edge.names])
     }
   }
   return { envs, clientImporters, parents, boundaries, facts, entries }

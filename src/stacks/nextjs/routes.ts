@@ -170,7 +170,16 @@ export function resolveAppRoutes(root: string, tree: SegmentNode): ResolvedRoute
 // Structural findings
 // ---------------------------------------------------------------------------
 
-export interface Finding { severity: 'critical' | 'high' | 'medium' | 'low' | 'info'; detail: string; file?: string }
+export interface Finding {
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  detail: string
+  file?: string
+  /** URL path the finding is about; .codebase-lens.json route patterns match this, never the detail text */
+  route?: string
+  /** For findings that list many routes: the routes, with `summary` being the detail text before the list */
+  routes?: string[]
+  summary?: string
+}
 
 export function auditAppTree(root: string, tree: SegmentNode, routes: ResolvedRoute[]): Finding[] {
   const findings: Finding[] = []
@@ -179,14 +188,14 @@ export function auditAppTree(root: string, tree: SegmentNode, routes: ResolvedRo
   const visit = (node: SegmentNode, hasLayoutAbove: boolean): void => {
     const f = node.files
     if (f.page && f.route && node.kind !== 'parallel') {
-      findings.push({ severity: 'high', detail: `page and route handler in the same segment "${node.path}" — Next.js rejects this at build time`, file: rel(f.route) })
+      findings.push({ severity: 'high', detail: `page and route handler in the same segment "${node.path}" — Next.js rejects this at build time`, file: rel(f.route), route: node.path })
     }
     for (const boundary of ['error', 'global-error'] as const) {
       const file = f[boundary]
       if (!file) continue
       const sf = parseFile(file)
       if (sf && fileDirective(sf) !== 'use client') {
-        findings.push({ severity: 'high', detail: `${boundary} boundary must be a Client Component — add 'use client'`, file: rel(file) })
+        findings.push({ severity: 'high', detail: `${boundary} boundary must be a Client Component — add 'use client'`, file: rel(file), route: node.path })
       }
     }
     for (const entry of ['page', 'layout'] as const) {
@@ -196,14 +205,14 @@ export function auditAppTree(root: string, tree: SegmentNode, routes: ResolvedRo
       if (!sf || fileDirective(sf) !== 'use client') continue
       const serverOnly = getExports(sf).map(e => e.name).filter(n => ['metadata', 'generateMetadata', 'generateStaticParams', 'viewport', 'generateViewport'].includes(n))
       if (serverOnly.length) {
-        findings.push({ severity: 'high', detail: `'use client' ${entry} exports ${serverOnly.join(', ')} — these are only allowed in Server Components and fail the build`, file: rel(file) })
+        findings.push({ severity: 'high', detail: `'use client' ${entry} exports ${serverOnly.join(', ')} — these are only allowed in Server Components and fail the build`, file: rel(file), route: node.path })
       }
     }
     if (node.kind === 'parallel' && !f.default) {
-      findings.push({ severity: 'medium', detail: `Parallel slot ${node.name} has no default.* — hard navigation to sub-routes the slot doesn't match will 404`, file: rel(node.dir) })
+      findings.push({ severity: 'medium', detail: `Parallel slot ${node.name} has no default.* — hard navigation to sub-routes the slot doesn't match will 404`, file: rel(node.dir), route: node.path })
     }
     if (f.page && !hasLayoutAbove && !f.layout) {
-      findings.push({ severity: 'high', detail: `Page at "${node.path}" has no root layout above it`, file: rel(f.page) })
+      findings.push({ severity: 'high', detail: `Page at "${node.path}" has no root layout above it`, file: rel(f.page), route: node.path })
     }
     for (const child of node.children) visit(child, hasLayoutAbove || !!f.layout)
   }
@@ -216,12 +225,14 @@ export function auditAppTree(root: string, tree: SegmentNode, routes: ResolvedRo
     byPath.set(r.path, [...(byPath.get(r.path) ?? []), r.file])
   }
   for (const [path, files] of byPath) {
-    if (files.length > 1) findings.push({ severity: 'high', detail: `Multiple files resolve to "${path}": ${files.join(', ')}` })
+    if (files.length > 1) findings.push({ severity: 'high', detail: `Multiple files resolve to "${path}": ${files.join(', ')}`, route: path })
   }
 
   const noErrorBoundary = routes.filter(r => r.type === 'page' && !r.error)
   if (noErrorBoundary.length) {
-    findings.push({ severity: 'info', detail: `${noErrorBoundary.length} page(s) have no error.* boundary in their segment chain (errors fall through to global-error or the default error page): ${noErrorBoundary.map(r => r.path).join(', ')}` })
+    const summary = 'Pages with no error.* boundary in their segment chain (errors fall through to global-error or the default error page)'
+    const routes = noErrorBoundary.map(r => r.path)
+    findings.push({ severity: 'info', detail: `${summary}: ${routes.join(', ')}`, summary, routes })
   }
   return findings
 }
